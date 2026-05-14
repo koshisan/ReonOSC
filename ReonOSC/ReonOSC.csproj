@@ -17,9 +17,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
-    <!-- OpenVR bindings: Valve.VR.OpenVRSDK isn't on NuGet under that name.
-         Until we vendor openvr_api.cs from ValveSoftware/openvr or pick a
-         working wrapper, the PF signal hook compiles but stays inert. -->
     <PackageReference Include="Vortice.Direct3D11" Version="3.6.2" />
     <PackageReference Include="Vortice.DXGI" Version="3.6.2" />
   </ItemGroup>
@@ -29,6 +26,13 @@
     <Content Include="web\**\*.*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Vendored OpenVR bindings from ValveSoftware/openvr (auto-generated;
+         do not edit). The .cs is auto-included as a Compile item by the SDK;
+         the native .dll is copied to the output root so DllImport can find it. -->
+    <None Include="OpenVR\openvr_api.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>openvr_api.dll</Link>
+    </None>
   </ItemGroup>
 
 </Project>
