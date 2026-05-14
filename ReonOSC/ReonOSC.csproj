@@ -12,6 +12,11 @@
     <AssemblyName>ReonOSC</AssemblyName>
     <Version>0.1.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\assets\reon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\assets\reon.ico" Link="assets\reon.ico" Pack="false" />
+  </ItemGroup>
 
 </Project>
