@@ -228,7 +228,7 @@ function App() {
   const [startMin, setStartMin] = useState(false);
   const [autoConn, setAutoConn] = useState(true);
   const [pfHook, setPfHook] = useState(false);
-  const [pfState, setPfState] = useState({ running: false, hex: "—" });
+  const [pfState, setPfState] = useState({ running: false, hex: "—", decoded: "Off", mode: "Off", level: 0 });
 
   // Incoming OSC inputs
   const [oscIn, setOscIn] = useState({ PFHotHigh: 0, water: 0, cold: 0.0, heat: 0.0 });
@@ -355,7 +355,13 @@ function App() {
 
       reonBridge.on("pf.signal", (p) => {
         if (!p) return;
-        setPfState({ running: !!p.running, hex: p.hex ?? "—" });
+        setPfState({
+          running: !!p.running,
+          hex: p.hex ?? "—",
+          decoded: p.decoded ?? "Off",
+          mode: p.mode ?? "Off",
+          level: p.level ?? 0,
+        });
       }),
     ];
 
@@ -686,6 +692,17 @@ function App() {
                         />
                         <span className="tag mono" style={{color: "var(--text-dim)"}}>
                           {pfState.hex}
+                        </span>
+                        <span
+                          className="tag"
+                          style={{
+                            color: pfState.mode === "Hot"  ? "var(--heat-2)"
+                                : pfState.mode === "Cool" ? "var(--cool-2)"
+                                : "var(--text-muted)",
+                            fontWeight: 600,
+                          }}
+                        >
+                          → {pfState.decoded}
                         </span>
                         <button
                           className="btn ghost"

@@ -254,3 +254,56 @@ public readonly record struct PfSignalSample(byte R, byte G, byte B)
     public static readonly PfSignalSample None = new(0, 0, 0);
     public override string ToString() => $"#{R:X2}{G:X2}{B:X2}";
 }
+
+public enum PfThermalMode { Off, Cool, Hot }
+
+/// <summary>
+/// Decoded Pebble-Feel thermal state. Levels are 1..4 (Cool has 4, Hot has 3);
+/// 0 means Off / no signal. Maps onto the Reon levels directly: PF level N
+/// corresponds to Reon wire-level (N-1), because PF starts counting from 1
+/// (Low/Mid/High/FastHigh) whereas Reon starts at 0.
+/// </summary>
+public readonly record struct PfThermalState(PfThermalMode Mode, int Level)
+{
+    public static readonly PfThermalState Off = new(PfThermalMode.Off, 0);
+    public override string ToString() =>
+        Mode == PfThermalMode.Off ? "Off" : $"{Mode} L{Level}";
+}
+
+public static class PfSignalDecoder
+{
+    /// <summary>
+    /// Decode a sampled pixel into the Pebble-Feel thermal state it encodes.
+    /// Reference colours from net.shiftall.pfsignal's PFSignal*Material.mat:
+    ///   Off          (  0,   0,   0)
+    ///   CoolLow      (  0,   0, 255)
+    ///   CoolMid      (  0,  64, 255)
+    ///   CoolHigh     (  0, 128, 255)
+    ///   CoolFastHigh (  0, 192, 255)
+    ///   HotLow       (255,   0,   0)
+    ///   HotMid       (255,  64,   0)
+    ///   HotHigh      (255, 128,   0)
+    ///
+    /// We use loose thresholds because the mirror texture path may dither or
+    /// blend slightly, and the 4x4 sample area can clip the finder pixels.
+    /// </summary>
+    public static PfThermalState Decode(PfSignalSample s)
+    {
+        bool isHot  = s.R >= 200 && s.B <= 64;
+        bool isCool = s.B >= 200 && s.R <= 64;
+
+        if (!isHot && !isCool) return PfThermalState.Off;
+
+        // Level inferred from green channel: 0=Low, 64=Mid, 128=High, 192=FastHigh.
+        int level =
+            s.G < 32  ? 1 :
+            s.G < 96  ? 2 :
+            s.G < 160 ? 3 :
+                        4;
+
+        // Hot doesn't have a FastHigh; clamp to High.
+        if (isHot && level > 3) level = 3;
+
+        return new PfThermalState(isHot ? PfThermalMode.Hot : PfThermalMode.Cool, level);
+    }
+}

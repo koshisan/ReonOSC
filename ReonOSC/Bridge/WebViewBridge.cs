@@ -51,11 +51,15 @@ public sealed class WebViewBridge : IDisposable
         _service.PfSignal.SignalChanged += (_, sample) =>
         {
             _lastPfHex = sample.ToString();
+            var thermal = PfSignalDecoder.Decode(sample);
             Push("pf.signal", new
             {
                 hex = _lastPfHex,
                 r = sample.R, g = sample.G, b = sample.B,
                 running = _service.PfSignal.IsRunning,
+                mode = thermal.Mode.ToString(),  // "Off" / "Cool" / "Hot"
+                level = thermal.Level,
+                decoded = thermal.ToString(),    // "Cool L2" etc.
             });
         };
         // NB: no log line on signal change — in a real VR scene the sampled
