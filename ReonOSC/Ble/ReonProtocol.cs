@@ -24,7 +24,16 @@ public static class ReonProtocol
     public const int AuthTokenLength = 17;
     public const int CommandFrameLength = 12;
     public const int LevelMin = 0;
-    public const int LevelMax = 3;
+    /// <summary>Absolute upper bound across all known models; per-direction
+    /// caps live in <see cref="DeviceCapabilities"/>.</summary>
+    public const int LevelMaxAbsolute = 4;
+    /// <summary>Backwards-compat alias preserved for callers that don't yet
+    /// honour per-device capabilities. New code should query the device's
+    /// <see cref="DeviceCapabilities"/> instead.</summary>
+    public const int LevelMax = LevelMaxAbsolute;
+
+    /// <summary>Standard BLE Device Information service — model number characteristic.</summary>
+    public static readonly Guid ModelNumberUuid = new("00002a24-0000-1000-8000-00805f9b34fb");
 
     public enum Mode : byte
     {
@@ -36,9 +45,9 @@ public static class ReonProtocol
 
     public static byte[] BuildCommand(Mode mode, int level = 0)
     {
-        if (mode != Mode.Stop && (level < LevelMin || level > LevelMax))
+        if (mode != Mode.Stop && (level < LevelMin || level > LevelMaxAbsolute))
             throw new ArgumentOutOfRangeException(nameof(level),
-                $"Level {level} out of range {LevelMin}..{LevelMax}.");
+                $"Level {level} out of range {LevelMin}..{LevelMaxAbsolute}.");
 
         var buf = new byte[CommandFrameLength];
         buf[3] = (byte)mode;
@@ -46,18 +55,26 @@ public static class ReonProtocol
         return buf;
     }
 
+    private static float? ReadTemp(byte hi, byte lo)
+    {
+        int v = (hi << 8) | lo;
+        return v == 0xffff ? null : v / 100f;
+    }
+
     /// <summary>
-    /// Decode the 4 plate temperatures from a CharTelem notify frame
-    /// (4 × big-endian int16 in 1/100 °C, with empirical channel labels).
+    /// Decode the first 4 sensor fields from a CharTelem notify frame
+    /// (big-endian int16 in 1/100 °C). 0xFFFF indicates an unwired slot
+    /// and is returned as null. RNP-P1 emits more sensors after the first
+    /// 4 (humidity etc.) but they're not currently surfaced.
     /// </summary>
     public static Telemetry? DecodeTelemetry(ReadOnlySpan<byte> data)
     {
         if (data.Length < 9) return null;
         return new Telemetry(
-            Board:     ((data[1] << 8) | data[2]) / 100f,
-            SkinPlate: ((data[3] << 8) | data[4]) / 100f,
-            Heatsink:  ((data[5] << 8) | data[6]) / 100f,
-            Ambient:   ((data[7] << 8) | data[8]) / 100f
+            Board:     ReadTemp(data[1], data[2]),
+            SkinPlate: ReadTemp(data[3], data[4]),
+            Heatsink:  ReadTemp(data[5], data[6]),
+            Ambient:   ReadTemp(data[7], data[8])
         );
     }
 
@@ -78,6 +95,20 @@ public static class ReonProtocol
     };
 }
 
-public readonly record struct Telemetry(float Board, float SkinPlate, float Heatsink, float Ambient);
+public readonly record struct Telemetry(float? Board, float? SkinPlate, float? Heatsink, float? Ambient);
 
 public readonly record struct StateEcho(byte Mode, byte Level);
+
+/// <summary>Per-model command-range capabilities.</summary>
+public sealed record DeviceCapabilities(int CoolLevelMax, int HeatLevelMax)
+{
+    public static readonly DeviceCapabilities Default = new(3, 3);
+
+    public static DeviceCapabilities ForModel(string? model) =>
+        (model ?? "").Trim() switch
+        {
+            "RNP-3"  => new DeviceCapabilities(3, 3),
+            "RNP-P1" => new DeviceCapabilities(4, 3),
+            _ => Default,
+        };
+}

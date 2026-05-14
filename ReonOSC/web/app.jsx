@@ -86,21 +86,24 @@ function NumInput({ value, onChange, min = 0, max = 9999, step = 1, width }) {
 }
 
 /* ---------- Level bars (clickable) ---------- */
-function LevelBars({ value, onChange, color }) {
+function LevelBars({ value, onChange, color, max = 4 }) {
+  const bars = [];
+  for (let i = 1; i <= max; i++) bars.push(i);
+  const clamped = Math.min(value, max);
   return (
     <div className="level">
       <div className="level-bars">
-        {[1, 2, 3, 4].map((i) => (
+        {bars.map((i) => (
           <div
             key={i}
-            className={`level-bar ${i <= value ? "active" : ""}`}
-            style={i <= value && color ? { background: color } : null}
-            onClick={() => onChange(i === value ? i - 1 : i)}
+            className={`level-bar ${i <= clamped ? "active" : ""}`}
+            style={i <= clamped && color ? { background: color } : null}
+            onClick={() => onChange(i === clamped ? i - 1 : i)}
             title={`Level ${i}`}
           />
         ))}
       </div>
-      <span className="level-num">L{value}</span>
+      <span className="level-num">L{clamped}</span>
     </div>
   );
 }
@@ -156,6 +159,10 @@ function App() {
   // Connection state
   const [connState, setConnState] = useState(hosted ? "disconnected" : "connected");
   const [macAddr, setMacAddr] = useState(hosted ? "—" : "F1:15:62:AC:D9:98");
+  const [model, setModel] = useState(null);
+  // Per-device level caps (cool max, heat max). Conservative default; updated
+  // from the backend's conn.state event once a device is connected.
+  const [caps, setCaps] = useState({ coolMax: 3, heatMax: 3 });
   const [fw, setFw] = useState(null);
   const [battery, setBattery] = useState(null);
   const [connectedAt, setConnectedAt] = useState(null);
@@ -214,7 +221,7 @@ function App() {
   // Sparkline data — only meaningful when temps come in
   const [plateHistory, setPlateHistory] = useState([]);
   useEffect(() => {
-    if (!hasTemps) return;
+    if (!hasTemps || temps.plate == null) return;
     setPlateHistory((h) => [...h.slice(-79), temps.plate]);
   }, [temps.plate, hasTemps]);
 
@@ -242,6 +249,11 @@ function App() {
         } else if (!connectedAt) {
           setConnectedAt(Date.now());
         }
+        if (p.model !== undefined) setModel(p.model);
+        if (p.caps) setCaps({
+          coolMax: p.caps.coolMax ?? 3,
+          heatMax: p.caps.heatMax ?? 3,
+        });
         if (p.fw !== undefined) setFw(p.fw);
         if (p.battery !== undefined) setBattery(p.battery);
       }),
@@ -271,11 +283,13 @@ function App() {
 
       reonBridge.on("telemetry", (p) => {
         if (!p) return;
+        // Null fields mean "sensor unwired / sentinel 0xffff" — preserve as null
+        // so the UI shows a dash instead of a misleading 655.35°C.
         setTemps({
-          plate: p.plate ?? 0,
-          sink: p.sink ?? 0,
-          board: p.board ?? 0,
-          ambient: p.ambient ?? 0,
+          plate: p.plate ?? null,
+          sink: p.sink ?? null,
+          board: p.board ?? null,
+          ambient: p.ambient ?? null,
         });
         setHasTemps(true);
       }),
@@ -525,7 +539,12 @@ function App() {
                   ))}
                 </div>
                 <span className="field-label" style={{width: 50, marginLeft: 12}}>Level</span>
-                <LevelBars value={manualLevel} onChange={onManualLevelChange} color={manualMode === "Cool" ? "#4ab8ff" : manualMode === "Heat" ? "#ff7a3d" : null}/>
+                <LevelBars
+                  value={manualLevel}
+                  onChange={onManualLevelChange}
+                  color={manualMode === "Cool" ? "#4ab8ff" : manualMode === "Heat" ? "#ff7a3d" : null}
+                  max={manualMode === "Heat" ? caps.heatMax : caps.coolMax}
+                />
               </div>
             </div>
           </div>
@@ -540,13 +559,13 @@ function App() {
                 <span className="osc-label">
                   Heat Touch <span className="tag" style={{color: "var(--heat-2)"}}>when PFHotHigh = 1</span>
                 </span>
-                <LevelBars value={heatLevel} onChange={onHeatLevelChange} color="#ff7a3d"/>
+                <LevelBars value={heatLevel} onChange={onHeatLevelChange} color="#ff7a3d" max={caps.heatMax}/>
               </div>
               <div className="row between">
                 <span className="osc-label">
                   Cold Water <span className="tag" style={{color: "var(--cool)"}}>when water = 1</span>
                 </span>
-                <LevelBars value={coldLevel} onChange={onColdLevelChange} color="#4ab8ff"/>
+                <LevelBars value={coldLevel} onChange={onColdLevelChange} color="#4ab8ff" max={caps.coolMax}/>
               </div>
             </div>
           </div>
@@ -599,7 +618,12 @@ function App() {
           </div>
 
           <div className="device-stage">
-            <ReonDevice mode={currentMode} level={currentLevel} plate={temps.plate} ambient={temps.ambient}/>
+            <ReonDevice
+              mode={currentMode}
+              level={currentLevel}
+              plate={temps.plate ?? 31.37}
+              ambient={temps.ambient ?? 30.69}
+            />
           </div>
 
           <div className="device-info">
@@ -619,15 +643,18 @@ function App() {
                 { l: "Sink",         v: temps.sink  },
                 { l: "Board",        v: temps.board },
                 { l: "Ambient",      v: temps.ambient },
-              ].map((c) => (
-                <div className="tel-cell" key={c.l}>
-                  <div className="tel-label">{c.l}</div>
-                  <div className="tel-value">
-                    {hasTemps ? c.v.toFixed(2) : "—"}
-                    {hasTemps && <span className="tel-unit">°C</span>}
+              ].map((c) => {
+                const has = hasTemps && c.v != null;
+                return (
+                  <div className="tel-cell" key={c.l}>
+                    <div className="tel-label">{c.l}</div>
+                    <div className="tel-value">
+                      {has ? c.v.toFixed(2) : "—"}
+                      {has && <span className="tel-unit">°C</span>}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {showSparkline && hasTemps && (

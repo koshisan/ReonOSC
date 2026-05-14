@@ -134,6 +134,12 @@ public sealed class WebViewBridge : IDisposable
         {
             state = _service.Reon.IsConnected ? "connected" : "disconnected",
             mac = _settings.LastKnownMac,
+            model = _service.Reon.Model,
+            caps = new
+            {
+                coolMax = _service.Reon.Capabilities.CoolLevelMax,
+                heatMax = _service.Reon.Capabilities.HeatLevelMax,
+            },
         });
         if (_service.LastSentCommand.Mode != ReonProtocol.Mode.Stop)
             PushCurrent(_service.LastSentCommand, _service.ManualOverride ? "Manual" : "OSC");
@@ -173,8 +179,18 @@ public sealed class WebViewBridge : IDisposable
             await _service.Reon.ConnectAsync(addr.Value, stored.TokenBytes);
             _connectedAt = DateTime.UtcNow;
             _knownAddress = addr;
-            Push("conn.state", new { state = "connected", mac = ReonClient.FormatMac(addr.Value) });
-            Push("log.line", new { t = Ts(), kind = "ok", msg = "Connected and authed." });
+            Push("conn.state", new
+            {
+                state = "connected",
+                mac = ReonClient.FormatMac(addr.Value),
+                model = _service.Reon.Model,
+                caps = new
+                {
+                    coolMax = _service.Reon.Capabilities.CoolLevelMax,
+                    heatMax = _service.Reon.Capabilities.HeatLevelMax,
+                },
+            });
+            Push("log.line", new { t = Ts(), kind = "ok", msg = $"Connected and authed{(_service.Reon.Model is { } m ? $" ({m})" : "")}." });
         }
         catch (Exception ex)
         {
@@ -288,9 +304,14 @@ public sealed class WebViewBridge : IDisposable
             "Heat" => ReonProtocol.Mode.Heat,
             _      => ReonProtocol.Mode.Stop,
         };
-        // The UI uses levels 0..4; the wire only supports 0..3. Clamp.
-        if (level > ReonProtocol.LevelMax) level = ReonProtocol.LevelMax;
-        if (level < ReonProtocol.LevelMin) level = ReonProtocol.LevelMin;
+
+        // Clamp against the per-direction cap derived from the connected
+        // device's model. The GUI honours this too, but we double-check here
+        // so a stale UI / future caller can't punch through.
+        var caps = _service.Reon.Capabilities;
+        var modeMax = mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
+        level = Math.Clamp(level, ReonProtocol.LevelMin, modeMax);
+
         _service.ManualCommand = new ResolvedCommand(mode, level);
         await _service.ReconcileAsync();
     }

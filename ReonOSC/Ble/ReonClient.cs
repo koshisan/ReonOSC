@@ -26,6 +26,12 @@ public sealed class ReonClient : IAsyncDisposable
 
     public bool IsConnected => _device?.ConnectionStatus == BluetoothConnectionStatus.Connected;
 
+    /// <summary>The device's Model Number read on connect (e.g. "RNP-3", "RNP-P1").</summary>
+    public string? Model { get; private set; }
+
+    /// <summary>Per-model capabilities. Falls back to a conservative default if model couldn't be read.</summary>
+    public DeviceCapabilities Capabilities { get; private set; } = DeviceCapabilities.Default;
+
     public static ulong ParseMac(string mac)
     {
         ulong result = 0;
@@ -87,6 +93,8 @@ public sealed class ReonClient : IAsyncDisposable
             ?? throw new InvalidOperationException("BluetoothLEDevice.FromBluetoothAddressAsync returned null.");
 
         _device.ConnectionStatusChanged += OnConnectionStatusChanged;
+
+        await ReadModelSafeAsync(ct);
 
         var svcResult = await _device.GetGattServicesForUuidAsync(ReonProtocol.ServiceUuid, BluetoothCacheMode.Uncached).AsTask(ct);
         if (svcResult.Status != GattCommunicationStatus.Success || svcResult.Services.Count == 0)
@@ -156,6 +164,35 @@ public sealed class ReonClient : IAsyncDisposable
         if (result.Status != GattCommunicationStatus.Success || result.Characteristics.Count == 0)
             throw new InvalidOperationException($"Characteristic {uuid} not found: {result.Status}");
         return result.Characteristics[0];
+    }
+
+    /// <summary>Read the model number (BLE Device Info 0x180a / 0x2a24) and
+    /// pick capabilities accordingly. Failures are non-fatal — we just keep
+    /// the conservative defaults.</summary>
+    private async Task ReadModelSafeAsync(CancellationToken ct)
+    {
+        try
+        {
+            var diUuid = new Guid("0000180a-0000-1000-8000-00805f9b34fb");
+            var diSvc = await _device!.GetGattServicesForUuidAsync(diUuid, BluetoothCacheMode.Cached).AsTask(ct);
+            if (diSvc.Status != GattCommunicationStatus.Success || diSvc.Services.Count == 0)
+                return;
+            var modelChars = await diSvc.Services[0]
+                .GetCharacteristicsForUuidAsync(ReonProtocol.ModelNumberUuid, BluetoothCacheMode.Cached)
+                .AsTask(ct);
+            if (modelChars.Status != GattCommunicationStatus.Success || modelChars.Characteristics.Count == 0)
+                return;
+            var readResult = await modelChars.Characteristics[0].ReadValueAsync(BluetoothCacheMode.Cached).AsTask(ct);
+            if (readResult.Status != GattCommunicationStatus.Success)
+                return;
+            Model = System.Text.Encoding.ASCII.GetString(BufferToBytes(readResult.Value)).Trim('\0').Trim();
+            Capabilities = DeviceCapabilities.ForModel(Model);
+            Logf($"Model={Model}  cool_max=L{Capabilities.CoolLevelMax}  heat_max=L{Capabilities.HeatLevelMax}");
+        }
+        catch
+        {
+            // Defaults stay in place.
+        }
     }
 
     private static async Task WriteCharAsync(GattCharacteristic ch, byte[] data, CancellationToken ct)
