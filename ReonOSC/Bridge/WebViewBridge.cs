@@ -28,6 +28,8 @@ public sealed class WebViewBridge : IDisposable
     private Settings _settings;
     private DateTime? _connectedAt;
     private ulong? _knownAddress;
+    private readonly System.Threading.Timer _packetPollTimer;
+    private long _lastPushedPacketCount = -1;
 
     public WebViewBridge(WebView2 web, ControlService service, Settings settings)
     {
@@ -51,10 +53,24 @@ public sealed class WebViewBridge : IDisposable
             r = sample.R, g = sample.G, b = sample.B,
             running = _service.PfSignal.IsRunning,
         });
+
+        // Poll the OSC packet counter every 500 ms and push osc.state when it
+        // changes, so the UI can show a live 'X packets' counter without per-
+        // packet log spam.
+        _packetPollTimer = new System.Threading.Timer(_ =>
+        {
+            var n = _service.OscPacketsReceived;
+            if (n != _lastPushedPacketCount)
+            {
+                _lastPushedPacketCount = n;
+                PushOscState();
+            }
+        }, null, TimeSpan.FromMilliseconds(500), TimeSpan.FromMilliseconds(500));
     }
 
     public void Dispose()
     {
+        try { _packetPollTimer.Dispose(); } catch { }
         try { _web.CoreWebView2.WebMessageReceived -= OnWebMessage; } catch { }
     }
 
@@ -450,7 +466,12 @@ public sealed class WebViewBridge : IDisposable
     }
 
     private void PushOscState()
-        => Push("osc.state", new { running = _service.Osc.IsRunning, port = _service.Osc.IsRunning ? _service.Osc.Port : _settings.OscPort });
+        => Push("osc.state", new
+        {
+            running = _service.Osc.IsRunning,
+            port = _service.Osc.IsRunning ? _service.Osc.Port : _settings.OscPort,
+            packets = _service.OscPacketsReceived,
+        });
 
     private void PushCurrent(ResolvedCommand cmd, string source)
     {

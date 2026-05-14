@@ -207,6 +207,7 @@ function App() {
   // OSC server
   const [oscPort, setOscPort] = useState(9302);
   const [oscRunning, setOscRunning] = useState(false);
+  const [oscPackets, setOscPackets] = useState(0);
   const [addresses, setAddresses] = useState({
     PFHotHigh: "/PFHotHigh",
     water: "/ChairOSC/v1/water",
@@ -300,6 +301,7 @@ function App() {
         if (!p) return;
         setOscRunning(!!p.running);
         if (p.port) setOscPort(p.port);
+        if (typeof p.packets === "number") setOscPackets(p.packets);
       }),
 
       reonBridge.on("osc.input", (p) => {
@@ -572,7 +574,7 @@ function App() {
               <div style={{display: "flex", alignItems: "center", gap: 10}}>
                 <span className={`pill ${oscRunning ? "connected" : "disconnected"}`}>
                   <span className={`pulse ${oscRunning ? "" : "off"}`} style={oscRunning ? {background: "var(--accent)", boxShadow: `0 0 0 0 ${accent}80`} : null}/>
-                  {oscRunning ? `OSC ${oscPort}` : "OSC off"}
+                  {oscRunning ? `OSC ${oscPort} · ${oscPackets} pkt` : "OSC off"}
                 </span>
                 <Icon name={configOpen ? "chevU" : "chevD"} size={14}/>
               </div>
