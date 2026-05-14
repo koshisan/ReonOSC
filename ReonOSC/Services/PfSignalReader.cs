@@ -33,7 +33,7 @@ public sealed class PfSignalReader : IDisposable
     public bool IsRunning => _loopTask is not null && !_loopTask.IsCompleted;
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(40); // ~25 Hz
 
-    public enum CaptureBackend { None, OpenVrMirror, DesktopDuplication }
+    public enum CaptureBackend { None, OpenVrMirror, WindowCapture }
     public CaptureBackend ActiveBackend { get; private set; } = CaptureBackend.None;
 
     private CVRSystem? _vr;
@@ -41,7 +41,6 @@ public sealed class PfSignalReader : IDisposable
     private ID3D11Device? _device;
     private ID3D11DeviceContext? _context;
     private ID3D11Texture2D? _staging;
-    private IDXGIOutputDuplication? _duplication;
     private IntPtr _vrchatHwnd;
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
@@ -164,106 +163,92 @@ public sealed class PfSignalReader : IDisposable
         }
     }
 
-    // -------- Desktop Duplication backend (VRChat desktop mode) -------------
+    // -------- Window-content capture (VRChat desktop mode) -----------------
+    //
+    // PrintWindow + PW_RENDERFULLCONTENT was added in Windows 8.1 specifically
+    // so screen-capture tools could grab D3D-rendered windows even when they're
+    // partially obscured by other windows. Slower than DXGI Output Duplication
+    // (GDI bitmap path) but it gives us the actual window content regardless of
+    // what's on top of VRChat on the desktop — which is the whole point.
 
     private string? _lastDxgiInitErrorReason; // rate-limit the "not found" / failure log
 
-    private bool TryInitDesktopDuplication()
+    private bool TryInitWindowCapture()
     {
-        try
+        _vrchatHwnd = FindVrChatWindow();
+        if (_vrchatHwnd == IntPtr.Zero)
         {
-            _vrchatHwnd = FindVrChatWindow();
-            if (_vrchatHwnd == IntPtr.Zero)
-            {
-                var processCount = SafeProcessCount("VRChat");
-                var reason = processCount == 0
-                    ? "no VRChat process running"
-                    : $"VRChat process is running (x{processCount}) but its main window handle wasn't found";
-                if (_lastDxgiInitErrorReason != reason)
-                {
-                    _lastDxgiInitErrorReason = reason;
-                    Logf($"PF signal (Desktop fallback): {reason}.");
-                }
-                return false;
-            }
-            _lastDxgiInitErrorReason = null;
-
-            // Vortice's COM methods take an out-param and return a Result; that's
-            // the canonical shape in v3.6.x.
-            using var dxgiDevice = _device!.QueryInterface<IDXGIDevice>();
-            var hr = dxgiDevice.GetAdapter(out var adapter);
-            if (hr.Failure || adapter is null) { Logf($"PF signal: dxgiDevice.GetAdapter failed: 0x{hr.Code:x8}"); return false; }
-
-            try
-            {
-                int outIdx = FindOutputContainingWindow(adapter, _vrchatHwnd);
-                hr = adapter.EnumOutputs((uint)outIdx, out var output);
-                if (hr.Failure || output is null) { Logf($"PF signal: adapter.EnumOutputs failed: 0x{hr.Code:x8}"); return false; }
-                try
-                {
-                    using var output1 = output.QueryInterface<IDXGIOutput1>();
-                    _duplication = output1.DuplicateOutput(_device);
-                    return true;
-                }
-                finally { output.Dispose(); }
-            }
-            finally { adapter.Dispose(); }
-        }
-        catch (Exception ex)
-        {
-            var reason = $"Desktop Duplication init exception: {ex.GetType().Name}: {ex.Message}";
+            var processCount = SafeProcessCount("VRChat");
+            var reason = processCount == 0
+                ? "no VRChat process running"
+                : $"VRChat process is running (x{processCount}) but MainWindowHandle == 0";
             if (_lastDxgiInitErrorReason != reason)
             {
                 _lastDxgiInitErrorReason = reason;
-                Logf($"PF signal: {reason}");
+                Logf($"PF signal (Window capture): {reason}.");
             }
             return false;
         }
+        _lastDxgiInitErrorReason = null;
+        return true;
     }
 
-    private bool TrySampleDxgi(out PfSignalSample sample)
+    private bool TrySampleWindow(out PfSignalSample sample)
     {
         sample = PfSignalSample.None;
-        if (_duplication is null || _device is null || _context is null) return false;
-        if (_vrchatHwnd == IntPtr.Zero || !IsWindow(_vrchatHwnd))
-        {
-            // VRChat went away — bail out gracefully so the loop can stop.
-            return false;
-        }
+        if (_vrchatHwnd == IntPtr.Zero || !IsWindow(_vrchatHwnd)) return false;
+        if (!GetClientRect(_vrchatHwnd, out var rect)) return false;
+        int w = rect.Right - rect.Left;
+        int h = rect.Bottom - rect.Top;
+        if (w <= 0 || h <= 0) return false;
 
-        IDXGIResource? desktopResource = null;
+        int sx = (int)(w * SamplePointX);
+        int sy = (int)(h * SamplePointY);
+        sx = Math.Clamp(sx, SampleRegion / 2, w - SampleRegion / 2 - 1);
+        sy = Math.Clamp(sy, SampleRegion / 2, h - SampleRegion / 2 - 1);
+
+        IntPtr windowDC = GetWindowDC(_vrchatHwnd);
+        if (windowDC == IntPtr.Zero) return false;
+        IntPtr memDC = IntPtr.Zero;
+        IntPtr bitmap = IntPtr.Zero;
+        IntPtr oldBitmap = IntPtr.Zero;
         try
         {
-            var ar = _duplication.AcquireNextFrame(100, out var _, out desktopResource);
-            if (ar.Failure || desktopResource is null) return false;
+            memDC = CreateCompatibleDC(windowDC);
+            if (memDC == IntPtr.Zero) return false;
+            bitmap = CreateCompatibleBitmap(windowDC, w, h);
+            if (bitmap == IntPtr.Zero) return false;
+            oldBitmap = SelectObject(memDC, bitmap);
 
-            using var desktopTexture = desktopResource.QueryInterface<ID3D11Texture2D>();
-            var deskDesc = desktopTexture.Description;
+            // PW_RENDERFULLCONTENT forces hardware-rendered windows (D3D11 etc.)
+            // to actually paint into our DC. Combined with PW_CLIENTONLY we skip
+            // the title bar so the sample fractions match the shader's
+            // screen-space coords.
+            if (!PrintWindow(_vrchatHwnd, memDC, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
+                return false;
 
-            // VRChat client area in desktop coordinates.
-            if (!GetClientRect(_vrchatHwnd, out var clientRect)) return false;
-            var origin = new POINT();
-            if (!ClientToScreen(_vrchatHwnd, ref origin)) return false;
-            int cw = clientRect.Right - clientRect.Left;
-            int ch = clientRect.Bottom - clientRect.Top;
-            if (cw <= 0 || ch <= 0) return false;
-
-            int sx = origin.X + (int)(cw * SamplePointX) - SampleRegion / 2;
-            int sy = origin.Y + (int)(ch * SamplePointY) - SampleRegion / 2;
-            sx = Math.Clamp(sx, 0, (int)deskDesc.Width  - SampleRegion);
-            sy = Math.Clamp(sy, 0, (int)deskDesc.Height - SampleRegion);
-
-            EnsureStaging(deskDesc);
-            _context.CopyResource(_staging!, desktopTexture);
-
-            var map = _context.Map(_staging!, 0, MapMode.Read);
-            try { sample = AveragePixel(map, deskDesc.Format, sx, sy); return true; }
-            finally { _context.Unmap(_staging!, 0); }
+            long r = 0, g = 0, b = 0;
+            int n = 0;
+            for (int dy = -SampleRegion / 2; dy < SampleRegion / 2; dy++)
+            for (int dx = -SampleRegion / 2; dx < SampleRegion / 2; dx++)
+            {
+                uint c = GetPixel(memDC, sx + dx, sy + dy);
+                if (c == 0xFFFFFFFFu) continue; // CLR_INVALID
+                r += (byte)( c        & 0xFF);
+                g += (byte)((c >>  8) & 0xFF);
+                b += (byte)((c >> 16) & 0xFF);
+                n++;
+            }
+            if (n == 0) return false;
+            sample = new PfSignalSample((byte)(r / n), (byte)(g / n), (byte)(b / n));
+            return true;
         }
         finally
         {
-            if (desktopResource is not null) { try { _duplication.ReleaseFrame(); } catch { } }
-            desktopResource?.Dispose();
+            if (oldBitmap != IntPtr.Zero) SelectObject(memDC, oldBitmap);
+            if (bitmap != IntPtr.Zero) DeleteObject(bitmap);
+            if (memDC != IntPtr.Zero) DeleteDC(memDC);
+            ReleaseDC(_vrchatHwnd, windowDC);
         }
     }
 
@@ -302,7 +287,7 @@ public sealed class PfSignalReader : IDisposable
                 bool ok = ActiveBackend switch
                 {
                     CaptureBackend.OpenVrMirror       => TrySampleOpenVR(out var s) && Handle(s),
-                    CaptureBackend.DesktopDuplication => TrySampleDxgi(out var s2) && Handle(s2),
+                    CaptureBackend.WindowCapture     => TrySampleWindow(out var s2) && Handle(s2),
                     _ => false,
                 };
 
@@ -337,16 +322,16 @@ public sealed class PfSignalReader : IDisposable
     /// ONLY when VRChat is the active SteamVR scene application — otherwise
     /// we'd be sampling SteamVR Home or whichever other VR app holds the
     /// scene, which has nothing to do with the PFSignal pixel in VRChat's
-    /// rendering. In that case we want Desktop Duplication of VRChat's window.
+    /// rendering. In that case we want a Window-capture of VRChat's HWND.
     /// </summary>
     private void PickBestBackend()
     {
         // If we're already on OpenVR, verify VRChat is still the scene app.
-        // If not, downgrade so the next pick can switch to DXGI.
+        // If not, downgrade so the next pick can switch to WindowCapture.
         if (ActiveBackend == CaptureBackend.OpenVrMirror)
         {
             if (IsVrChatTheVrScene()) return;
-            Logf("OpenVR scene focus isn't VRChat — downgrading to Desktop Duplication.");
+            Logf("OpenVR scene focus isn't VRChat — downgrading to Window capture.");
             ShutdownOpenVR();
             ActiveBackend = CaptureBackend.None;
         }
@@ -356,11 +341,9 @@ public sealed class PfSignalReader : IDisposable
         {
             if (IsVrChatTheVrScene())
             {
-                if (ActiveBackend == CaptureBackend.DesktopDuplication)
+                if (ActiveBackend == CaptureBackend.WindowCapture)
                 {
-                    Logf("VRChat is now the SteamVR scene — switching from Desktop to OpenVR mirror.");
-                    try { _duplication?.Dispose(); } catch { }
-                    _duplication = null;
+                    Logf("VRChat is now the SteamVR scene — switching from Window capture to OpenVR mirror.");
                     _vrchatHwnd = IntPtr.Zero;
                 }
                 else
@@ -372,18 +355,15 @@ public sealed class PfSignalReader : IDisposable
             }
             else
             {
-                // Init succeeded but VRChat isn't the scene app (it's running
-                // in desktop mode, or a different VR app has the scene focus).
-                // Tear OpenVR back down to avoid sampling the wrong content.
                 ShutdownOpenVR();
             }
         }
 
-        if (ActiveBackend == CaptureBackend.DesktopDuplication) return;
-        if (TryInitDesktopDuplication())
+        if (ActiveBackend == CaptureBackend.WindowCapture) return;
+        if (TryInitWindowCapture())
         {
-            ActiveBackend = CaptureBackend.DesktopDuplication;
-            Logf("Desktop Duplication backend active (capturing VRChat window).");
+            ActiveBackend = CaptureBackend.WindowCapture;
+            Logf("Window capture backend active (PrintWindow on VRChat HWND).");
         }
     }
 
@@ -412,9 +392,7 @@ public sealed class PfSignalReader : IDisposable
             case CaptureBackend.OpenVrMirror:
                 ShutdownOpenVR();
                 break;
-            case CaptureBackend.DesktopDuplication:
-                try { _duplication?.Dispose(); } catch { }
-                _duplication = null;
+            case CaptureBackend.WindowCapture:
                 _vrchatHwnd = IntPtr.Zero;
                 break;
         }
@@ -487,11 +465,10 @@ public sealed class PfSignalReader : IDisposable
     private void Cleanup()
     {
         try { _staging?.Dispose(); } catch { }
-        try { _duplication?.Dispose(); } catch { }
         try { _context?.Dispose(); } catch { }
         try { _device?.Dispose(); } catch { }
         ShutdownOpenVR();
-        _staging = null; _duplication = null; _context = null; _device = null;
+        _staging = null; _context = null; _device = null;
         _vrchatHwnd = IntPtr.Zero;
         ActiveBackend = CaptureBackend.None;
         _cts?.Dispose();
@@ -521,6 +498,36 @@ public sealed class PfSignalReader : IDisposable
     private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindowDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("user32.dll")]
+    private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int cx, int cy);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr ho);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern uint GetPixel(IntPtr hdc, int x, int y);
+
+    private const uint PW_CLIENTONLY        = 0x00000001;
+    private const uint PW_RENDERFULLCONTENT = 0x00000002;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -570,28 +577,6 @@ public sealed class PfSignalReader : IDisposable
         catch { return -1; }
     }
 
-    private static int FindOutputContainingWindow(IDXGIAdapter adapter, IntPtr hwnd)
-    {
-        if (!GetClientRect(hwnd, out var client)) return 0;
-        var origin = new POINT();
-        if (!ClientToScreen(hwnd, ref origin)) return 0;
-        int centerX = origin.X + (client.Right - client.Left) / 2;
-        int centerY = origin.Y + (client.Bottom - client.Top) / 2;
-
-        for (uint i = 0; i < 8; i++)   // hard cap: no machine has >8 monitors plugged into one adapter
-        {
-            var hr = adapter.EnumOutputs(i, out var output);
-            if (hr.Failure || output is null) return 0;
-            try
-            {
-                var r = output.Description.DesktopCoordinates;
-                if (centerX >= r.Left && centerX < r.Right && centerY >= r.Top && centerY < r.Bottom)
-                    return (int)i;
-            }
-            finally { output.Dispose(); }
-        }
-        return 0;
-    }
 }
 
 /// <summary>One RGB sample from the capture source. (0,0,0) means "off / no signal".</summary>
