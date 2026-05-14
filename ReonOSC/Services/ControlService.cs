@@ -23,6 +23,9 @@ public sealed class ControlService : IAsyncDisposable
 
     public ResolvedCommand LastSentCommand { get; private set; } = ResolvedCommand.Stop;
     public DateTime LastSentAt { get; private set; }
+    /// <summary>Which input source authored the last sent command — used by the
+    /// GUI's SOURCE indicator. One of "Manual", "PF", "OSC".</summary>
+    public string LastCommandSource { get; private set; } = "OSC";
 
     public event EventHandler<ResolvedCommand>? CommandSent;
     public event EventHandler<string>? Log;
@@ -40,7 +43,22 @@ public sealed class ControlService : IAsyncDisposable
         Osc.Log += (_, msg) => Log?.Invoke(this, msg);
         Reon.Log += (_, msg) => Log?.Invoke(this, msg);
         PfSignal.Log += (_, msg) => Log?.Invoke(this, msg);
+
+        // Plug the PFSignal reader directly into the resolver: every time the
+        // decoded thermal state changes (e.g. user walks into a heat zone),
+        // we trigger a reconcile and the next target picks PF over OSC.
+        PfSignal.SignalChanged += (_, sample) =>
+        {
+            var next = PfSignalDecoder.Decode(sample);
+            if (next != _pfState)
+            {
+                _pfState = next;
+                _ = ReconcileAsync();
+            }
+        };
     }
+
+    private PfThermalState _pfState = PfThermalState.Off;
 
     public async ValueTask DisposeAsync()
     {
@@ -182,16 +200,35 @@ public sealed class ControlService : IAsyncDisposable
         ["heat"]      = _inputs.Get(InputSource.Heat),
     };
 
+    /// <summary>
+    /// Resolve the current target across all input sources.
+    /// Priority: ManualOverride > PF signal (when active) > OSC inputs.
+    /// PF levels (1..4) are clamped to the connected device's per-direction
+    /// max (e.g. CoolFastHigh → Cool L3 on an RNP-3 which caps cool at 3).
+    /// </summary>
+    private (ResolvedCommand cmd, string source) ResolveTarget()
+    {
+        if (ManualOverride) return (ManualCommand, "Manual");
+
+        if (_pfState.Mode != PfThermalMode.Off)
+        {
+            var mode = _pfState.Mode == PfThermalMode.Hot ? ReonProtocol.Mode.Heat : ReonProtocol.Mode.Cool;
+            var caps = Reon.Capabilities;
+            var max  = mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
+            int level = Math.Clamp(_pfState.Level, 0, max);
+            return (new ResolvedCommand(mode, level), "PF");
+        }
+
+        return (ControlResolver.Resolve(_inputs, Settings), "OSC");
+    }
+
     /// <summary>Resolve the current target and push it to the device if it differs from the last sent.</summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
     {
         if (!Reon.IsConnected) return;
 
-        var target = ManualOverride
-            ? ManualCommand
-            : ControlResolver.Resolve(_inputs, Settings);
-
-        if (target == LastSentCommand) return;
+        var (target, source) = ResolveTarget();
+        if (target == LastSentCommand && source == LastCommandSource) return;
 
         if (!await _writeLock.WaitAsync(0, ct).ConfigureAwait(false)) return;
         try
@@ -202,10 +239,8 @@ public sealed class ControlService : IAsyncDisposable
                 await Task.Delay(_minWriteGap - elapsed, ct).ConfigureAwait(false);
 
             // re-evaluate after the wait so we don't send a stale target
-            target = ManualOverride
-                ? ManualCommand
-                : ControlResolver.Resolve(_inputs, Settings);
-            if (target == LastSentCommand) return;
+            (target, source) = ResolveTarget();
+            if (target == LastSentCommand && source == LastCommandSource) return;
 
             try
             {
@@ -217,6 +252,7 @@ public sealed class ControlService : IAsyncDisposable
                 }
                 LastSentCommand = target;
                 LastSentAt = DateTime.UtcNow;
+                LastCommandSource = source;
                 CommandSent?.Invoke(this, target);
             }
             catch (Exception ex)

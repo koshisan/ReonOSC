@@ -42,7 +42,7 @@ public sealed class WebViewBridge : IDisposable
         _web.CoreWebView2.WebMessageReceived += OnWebMessage;
 
         _service.Log += (_, msg) => Push("log.line", new { t = Ts(), kind = ClassifyLog(msg), msg });
-        _service.CommandSent += (_, cmd) => PushCurrent(cmd, _service.ManualOverride ? "Manual" : "OSC");
+        _service.CommandSent += (_, cmd) => PushCurrent(cmd, _service.LastCommandSource);
         _service.Reon.TelemetryReceived += (_, t) => Push("telemetry", new
         {
             plate = t.SkinPlate, sink = t.Heatsink, board = t.Board, ambient = t.Ambient,
@@ -205,7 +205,7 @@ public sealed class WebViewBridge : IDisposable
             },
         });
         if (_service.LastSentCommand.Mode != ReonProtocol.Mode.Stop)
-            PushCurrent(_service.LastSentCommand, _service.ManualOverride ? "Manual" : "OSC");
+            PushCurrent(_service.LastSentCommand, _service.LastCommandSource);
 
         // Push the current OSC inputs once so the GUI has a baseline reading.
         PushInputs(_service.Snapshot());
