@@ -665,36 +665,47 @@ function App() {
                     <span className="check-box"/>
                     Auto-connect to Reon on start
                   </label>
-                  <label className="check" title="Reads the Pebble Feel signal pixel from the SteamVR compositor mirror texture. Experimental.">
-                    <input type="checkbox" checked={pfHook} onChange={(e) => onPfHookChange(e.target.checked)}/>
-                    <span className="check-box"/>
-                    Pebble Feel signal hook
+                  <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap"}}>
+                    <label className="check" title="Reads the Pebble Feel signal pixel from the SteamVR compositor mirror texture. Experimental.">
+                      <input type="checkbox" checked={pfHook} onChange={(e) => onPfHookChange(e.target.checked)}/>
+                      <span className="check-box"/>
+                      Pebble Feel signal hook
+                    </label>
                     {pfHook && pfState.running && (
                       <>
                         <span
                           style={{
                             display: "inline-block",
-                            width: 14,
-                            height: 14,
+                            width: 16,
+                            height: 16,
                             background: pfState.hex || "#000",
                             border: "1px solid var(--border)",
                             borderRadius: 3,
-                            marginLeft: 10,
-                            verticalAlign: "middle",
                           }}
                           title={pfState.hex}
                         />
-                        <span className="tag mono" style={{marginLeft: 8, color: "var(--text-dim)"}}>
+                        <span className="tag mono" style={{color: "var(--text-dim)"}}>
                           {pfState.hex}
                         </span>
+                        <button
+                          className="btn ghost"
+                          style={{padding: "3px 10px", fontSize: 11.5}}
+                          onClick={() => {
+                            const label = window.prompt("Snapshot label (optional):", "") ?? "";
+                            send("pfSignal.capture", { label });
+                          }}
+                          title="Snapshot the current pixel value into the log with an optional label"
+                        >
+                          Capture
+                        </button>
                       </>
                     )}
                     {pfHook && !pfState.running && (
-                      <span className="tag mono" style={{marginLeft: 8, color: "var(--text-muted)"}}>
+                      <span className="tag mono" style={{color: "var(--text-muted)"}}>
                         not running
                       </span>
                     )}
-                  </label>
+                  </div>
                 </div>
               </div>
             )}

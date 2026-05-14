@@ -30,6 +30,7 @@ public sealed class WebViewBridge : IDisposable
     private ulong? _knownAddress;
     private readonly System.Threading.Timer _packetPollTimer;
     private long _lastPushedPacketCount = -1;
+    private string _lastPfHex = "#000000";
 
     public WebViewBridge(WebView2 web, ControlService service, Settings settings)
     {
@@ -47,12 +48,16 @@ public sealed class WebViewBridge : IDisposable
             plate = t.SkinPlate, sink = t.Heatsink, board = t.Board, ambient = t.Ambient,
         });
         _service.InputsChanged += (_, snapshot) => PushInputs(snapshot);
-        _service.PfSignal.SignalChanged += (_, sample) => Push("pf.signal", new
+        _service.PfSignal.SignalChanged += (_, sample) =>
         {
-            hex = sample.ToString(),
-            r = sample.R, g = sample.G, b = sample.B,
-            running = _service.PfSignal.IsRunning,
-        });
+            _lastPfHex = sample.ToString();
+            Push("pf.signal", new
+            {
+                hex = _lastPfHex,
+                r = sample.R, g = sample.G, b = sample.B,
+                running = _service.PfSignal.IsRunning,
+            });
+        };
         // NB: no log line on signal change — in a real VR scene the sampled
         // pixel updates on every render frame (head motion, animations, etc.),
         // which would flood the log. The live swatch in the GUI is the
@@ -133,6 +138,7 @@ public sealed class WebViewBridge : IDisposable
             case "preset.cold":    PresetCold(payload); break;
             case "options.set":    SetOptions(payload); break;
             case "pfHook.toggle":  TogglePfHook(payload); break;
+            case "pfSignal.capture": CapturePfSignal(payload); break;
             case "log.clear":      /* the UI owns its own log buffer */ break;
             default: Push("log.line", new { t = Ts(), kind = "err", msg = $"Unknown command: {cmd}" }); break;
         }
@@ -426,6 +432,19 @@ public sealed class WebViewBridge : IDisposable
             _settings.Save();
             _service.ApplySettings(_settings);
         }
+    }
+
+    private void CapturePfSignal(JsonElement payload)
+    {
+        if (!_service.PfSignal.IsRunning)
+        {
+            Push("log.line", new { t = Ts(), kind = "err", msg = "PF capture: hook is not running" });
+            return;
+        }
+        var label = payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("label", out var l)
+                    ? l.GetString() : null;
+        var prefix = string.IsNullOrWhiteSpace(label) ? "PF capture" : $"PF capture [{label!.Trim()}]";
+        Push("log.line", new { t = Ts(), kind = "info", msg = $"{prefix}: {_lastPfHex}" });
     }
 
     private void TogglePfHook(JsonElement payload)
