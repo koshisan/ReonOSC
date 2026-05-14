@@ -743,7 +743,11 @@ function App() {
         <section className="device-panel">
           <div className="device-toolbar">
             <div className="device-toolbar-left">
-              <span className="mini-stat">{currentSource === "Manual" ? "MANUAL" : "OSC"}</span>
+              <span className="mini-stat">
+                {manualOverride
+                  ? "MANUAL"
+                  : (currentSource ? currentSource.toUpperCase() : "OSC")}
+              </span>
             </div>
             <div className="device-toolbar-right">
               {fw && <span className="mini-stat">FW {fw}</span>}
@@ -766,7 +770,7 @@ function App() {
                 {currentMode}{currentMode !== "Stop" ? ` L${currentLevel}` : ""}
               </span>
               <span className="mode-meta">
-                <div>SOURCE · <strong>{currentSource === "Manual" || manualOverride ? "Manual" : "OSC"}</strong></div>
+                <div>SOURCE · <strong>{manualOverride ? "Manual" : (currentSource || "OSC")}</strong></div>
                 <div style={{marginTop: 2}}>UPTIME · <strong>{fmtUptime(uptime)}</strong></div>
               </span>
             </div>
