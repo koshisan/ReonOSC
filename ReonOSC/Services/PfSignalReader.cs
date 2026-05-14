@@ -166,6 +166,8 @@ public sealed class PfSignalReader : IDisposable
 
     // -------- Desktop Duplication backend (VRChat desktop mode) -------------
 
+    private string? _lastDxgiInitErrorReason; // rate-limit the "not found" / failure log
+
     private bool TryInitDesktopDuplication()
     {
         try
@@ -173,9 +175,18 @@ public sealed class PfSignalReader : IDisposable
             _vrchatHwnd = FindVrChatWindow();
             if (_vrchatHwnd == IntPtr.Zero)
             {
-                Logf("PF signal: VRChat window not found. Start VRChat first, then re-enable the hook.");
+                var processCount = SafeProcessCount("VRChat");
+                var reason = processCount == 0
+                    ? "no VRChat process running"
+                    : $"VRChat process is running (x{processCount}) but its main window handle wasn't found";
+                if (_lastDxgiInitErrorReason != reason)
+                {
+                    _lastDxgiInitErrorReason = reason;
+                    Logf($"PF signal (Desktop fallback): {reason}.");
+                }
                 return false;
             }
+            _lastDxgiInitErrorReason = null;
 
             // Vortice's COM methods take an out-param and return a Result; that's
             // the canonical shape in v3.6.x.
@@ -200,7 +211,12 @@ public sealed class PfSignalReader : IDisposable
         }
         catch (Exception ex)
         {
-            Logf($"PF signal: Desktop Duplication init failed: {ex.Message}");
+            var reason = $"Desktop Duplication init exception: {ex.GetType().Name}: {ex.Message}";
+            if (_lastDxgiInitErrorReason != reason)
+            {
+                _lastDxgiInitErrorReason = reason;
+                Logf($"PF signal: {reason}");
+            }
             return false;
         }
     }
@@ -481,22 +497,44 @@ public sealed class PfSignalReader : IDisposable
 
     private static IntPtr FindVrChatWindow()
     {
+        // Process-based lookup first — most reliable, doesn't care about the
+        // window title string. The VRChat exe runs as 'VRChat.exe'.
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("VRChat"))
+            {
+                try
+                {
+                    if (p.MainWindowHandle != IntPtr.Zero) return p.MainWindowHandle;
+                }
+                catch { /* access denied or process exited */ }
+                finally { p.Dispose(); }
+            }
+        }
+        catch { /* fall through to title scan */ }
+
+        // Fallback: EnumWindows by title, broad match. Some VRChat builds
+        // include a version suffix, an emoji indicator etc.
         IntPtr found = IntPtr.Zero;
         EnumWindows((hwnd, _) =>
         {
             var sb = new StringBuilder(256);
             GetWindowText(hwnd, sb, sb.Capacity);
             var title = sb.ToString();
-            // VRChat's window title starts with 'VRChat' — sometimes followed by
-            // a build number. Be a little permissive.
-            if (title.StartsWith("VRChat", StringComparison.OrdinalIgnoreCase))
+            if (title.IndexOf("vrchat", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 found = hwnd;
-                return false; // stop enumerating
+                return false;
             }
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+
+    private static int SafeProcessCount(string name)
+    {
+        try { return System.Diagnostics.Process.GetProcessesByName(name).Length; }
+        catch { return -1; }
     }
 
     private static int FindOutputContainingWindow(IDXGIAdapter adapter, IntPtr hwnd)
