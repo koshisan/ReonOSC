@@ -195,6 +195,15 @@ public sealed class WebViewBridge : IDisposable
         // Push the current OSC inputs once so the GUI has a baseline reading.
         PushInputs(_service.Snapshot());
 
+        // The first OSC packet may have arrived before the bridge was wired
+        // (the GUI takes a few seconds to come up). Surface that info now
+        // so the user can confirm the pipe and see what's actually arriving.
+        if (_service.FirstOscAddress is { } addr)
+        {
+            Push("log.line", new { t = Ts(), kind = "info",
+                msg = $"OSC first packet: {addr} = {_service.FirstOscArg}  ({_service.OscPacketsReceived} total)" });
+        }
+
         if (_settings.AutoConnectOnStart && !_service.Reon.IsConnected)
             _ = ConnectAsync();
     }

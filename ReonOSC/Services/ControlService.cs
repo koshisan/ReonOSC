@@ -75,6 +75,12 @@ public sealed class ControlService : IAsyncDisposable
     /// so we emit exactly one log line confirming the pipe is live.</summary>
     private bool _firstOscLogged;
 
+    /// <summary>Address of the first OSC packet received this session, or null
+    /// if none yet. Surfaced via the bridge so the user always sees this even
+    /// when the first packet arrived before the GUI was up.</summary>
+    public string? FirstOscAddress { get; private set; }
+    public string? FirstOscArg { get; private set; }
+
     private void OnOscMessage(object? sender, OscMessage msg)
     {
         OscPacketsReceived++;
@@ -84,6 +90,8 @@ public sealed class ControlService : IAsyncDisposable
             var argHint = msg.Arguments.Count == 0 ? "(no args)"
                         : msg.Arguments[0] is null ? "null"
                         : msg.Arguments[0]!.ToString() ?? "?";
+            FirstOscAddress = msg.Address;
+            FirstOscArg = argHint;
             Log?.Invoke(this, $"OSC first packet: {msg.Address} = {argHint}");
         }
 
