@@ -1,0 +1,647 @@
+/* global React, ReactDOM, ReonDevice, reonBridge */
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ---------- helpers ---------- */
+const pad = (n) => String(n).padStart(2, "0");
+const fmtTime = (d = new Date()) =>
+  `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+
+const fmtUptime = (sec) => {
+  if (!sec || sec < 0) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+};
+
+const MODES = ["Stop", "Cool", "Heat"];
+const LEVEL_MAX = 4;
+
+/* ---------- icons ---------- */
+const Icon = ({ name, size = 14, stroke = 1.6 }) => {
+  const paths = {
+    link: <><path d="M9 7h-3a4 4 0 0 0 0 8h3M15 7h3a4 4 0 0 1 0 8h-3M8 11h8"/></>,
+    unlink: <><path d="M9 7h-3a4 4 0 0 0 0 8h3M15 7h3a4 4 0 0 1 0 8h-3"/><path d="M4 4l16 16"/></>,
+    bluetooth: <path d="M7 7l10 10-5 4V3l5 4L7 17"/>,
+    play: <path d="M6 4l12 8-12 8z" strokeLinejoin="round"/>,
+    stop: <rect x="6" y="6" width="12" height="12" rx="1"/>,
+    chevD: <path d="M6 9l6 6 6-6"/>,
+    chevU: <path d="M6 15l6-6 6 6"/>,
+    trash: <><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></>,
+    moon: <path d="M20 14.5A8 8 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>,
+    sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M22 12h-2M4 12H2M19.07 4.93l-1.41 1.41M6.34 17.66l-1.41 1.41M19.07 19.07l-1.41-1.41M6.34 6.34L4.93 4.93"/></>,
+  };
+  return (
+    <svg className="btn-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
+      {paths[name]}
+    </svg>
+  );
+};
+
+/* ---------- Sparkline ---------- */
+function Sparkline({ data, color, height = 48 }) {
+  if (!data.length) return <div className="sparkline"/>;
+  const w = 460, h = height;
+  const min = Math.min(...data), max = Math.max(...data);
+  const span = max - min || 1;
+  const step = w / Math.max(1, data.length - 1);
+  const pts = data.map((v, i) => [i * step, h - ((v - min) / span) * (h - 6) - 3]);
+  const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+  const area = d + ` L ${w} ${h} L 0 ${h} Z`;
+  return (
+    <svg className="sparkline" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="spark-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.35"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d={area} fill="url(#spark-fill)"/>
+      <path d={d} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+      <circle cx={pts[pts.length-1][0]} cy={pts[pts.length-1][1]} r="2.5" fill={color}/>
+    </svg>
+  );
+}
+
+/* ---------- NumInput ---------- */
+function NumInput({ value, onChange, min = 0, max = 9999, step = 1, width }) {
+  const set = (v) => {
+    if (Number.isNaN(v)) return;
+    onChange(Math.max(min, Math.min(max, v)));
+  };
+  return (
+    <span className="num" style={width ? { width } : null}>
+      <input
+        type="number"
+        value={value}
+        min={min} max={max} step={step}
+        onChange={(e) => set(Number(e.target.value))}
+      />
+      <span className="num-steppers">
+        <button className="num-step" onClick={() => set(Number(value) + step)} aria-label="up">▲</button>
+        <button className="num-step" onClick={() => set(Number(value) - step)} aria-label="down">▼</button>
+      </span>
+    </span>
+  );
+}
+
+/* ---------- Level bars (clickable) ---------- */
+function LevelBars({ value, onChange, color }) {
+  return (
+    <div className="level">
+      <div className="level-bars">
+        {[1, 2, 3, 4].map((i) => (
+          <div
+            key={i}
+            className={`level-bar ${i <= value ? "active" : ""}`}
+            style={i <= value && color ? { background: color } : null}
+            onClick={() => onChange(i === value ? i - 1 : i)}
+            title={`Level ${i}`}
+          />
+        ))}
+      </div>
+      <span className="level-num">L{value}</span>
+    </div>
+  );
+}
+
+/* ---------- App ---------- */
+function App() {
+  // Theme is the only "tweak" that stays in the shipping build.
+  const [theme, setTheme] = useState(() => localStorage.getItem("reon.theme") || "dark");
+  const [showSparkline, setShowSparkline] = useState(() => localStorage.getItem("reon.spark") !== "0");
+  const [compactLog, setCompactLog] = useState(() => localStorage.getItem("reon.compactlog") === "1");
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("reon.theme", theme);
+  }, [theme]);
+  useEffect(() => { localStorage.setItem("reon.spark", showSparkline ? "1" : "0"); }, [showSparkline]);
+  useEffect(() => { localStorage.setItem("reon.compactlog", compactLog ? "1" : "0"); }, [compactLog]);
+
+  const hosted = !!(window.reonBridge && window.reonBridge.isHosted);
+  const send = useCallback((cmd, payload) => {
+    if (hosted) reonBridge.send(cmd, payload);
+  }, [hosted]);
+
+  // Connection state
+  const [connState, setConnState] = useState(hosted ? "disconnected" : "connected");
+  const [macAddr, setMacAddr] = useState(hosted ? "—" : "F1:15:62:AC:D9:98");
+  const [fw, setFw] = useState(null);
+  const [battery, setBattery] = useState(null);
+  const [connectedAt, setConnectedAt] = useState(null);
+  const [uptime, setUptime] = useState(0);
+
+  // OSC server
+  const [oscPort, setOscPort] = useState(9001);
+  const [oscRunning, setOscRunning] = useState(false);
+  const [addresses, setAddresses] = useState({
+    PFHotHigh: "/PFHotHigh",
+    water: "/ChairOSC/v1/water",
+    cold: "/ChairOSC/v1/cold",
+    heat: "/ChairOSC/v1/heat",
+  });
+
+  // Manual control
+  const [manualOverride, setManualOverride] = useState(false);
+  const [manualMode, setManualMode] = useState("Cool");
+  const [manualLevel, setManualLevel] = useState(3);
+
+  // Presets
+  const [heatLevel, setHeatLevel] = useState(3);
+  const [coldLevel, setColdLevel] = useState(3);
+
+  // Options
+  const [startMin, setStartMin] = useState(false);
+  const [autoConn, setAutoConn] = useState(true);
+
+  // Incoming OSC inputs
+  const [oscIn, setOscIn] = useState({ PFHotHigh: 0, water: 0, cold: 0.0, heat: 0.0 });
+
+  // Live derived state pushed by backend
+  const [currentMode, setCurrentMode] = useState("Stop");
+  const [currentLevel, setCurrentLevel] = useState(0);
+  const [currentSource, setCurrentSource] = useState("OSC");
+  const [temps, setTemps] = useState({ plate: 0, sink: 0, board: 0, ambient: 0 });
+  const [hasTemps, setHasTemps] = useState(false);
+
+  // Log
+  const [log, setLog] = useState([]);
+  const logBodyRef = useRef(null);
+
+  const appendLog = useCallback((k, msg) => {
+    setLog((prev) => {
+      const next = [...prev, { t: fmtTime(), k, msg }];
+      return next.slice(-200);
+    });
+  }, []);
+
+  // Auto-scroll log
+  useEffect(() => {
+    const el = logBodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [log]);
+
+  // Sparkline data — only meaningful when temps come in
+  const [plateHistory, setPlateHistory] = useState([]);
+  useEffect(() => {
+    if (!hasTemps) return;
+    setPlateHistory((h) => [...h.slice(-79), temps.plate]);
+  }, [temps.plate, hasTemps]);
+
+  // Uptime tick once per second while connected
+  useEffect(() => {
+    if (!connectedAt) { setUptime(0); return; }
+    const tick = () => setUptime(Math.floor((Date.now() - connectedAt) / 1000));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [connectedAt]);
+
+  /* ---------- Bridge subscriptions (only in hosted mode) ---------- */
+  useEffect(() => {
+    if (!hosted) return;
+
+    const unsubs = [
+      reonBridge.on("conn.state", (p) => {
+        if (!p) return;
+        setConnState(p.state);
+        if (p.mac) setMacAddr(p.mac);
+        if (p.state !== "connected") {
+          setMacAddr("—");
+          setConnectedAt(null);
+        } else if (!connectedAt) {
+          setConnectedAt(Date.now());
+        }
+        if (p.fw !== undefined) setFw(p.fw);
+        if (p.battery !== undefined) setBattery(p.battery);
+      }),
+
+      reonBridge.on("osc.state", (p) => {
+        if (!p) return;
+        setOscRunning(!!p.running);
+        if (p.port) setOscPort(p.port);
+      }),
+
+      reonBridge.on("osc.input", (p) => {
+        if (!p) return;
+        setOscIn({
+          PFHotHigh: p.PFHotHigh ?? 0,
+          water: p.water ?? 0,
+          cold: p.cold ?? 0,
+          heat: p.heat ?? 0,
+        });
+      }),
+
+      reonBridge.on("state.current", (p) => {
+        if (!p) return;
+        setCurrentMode(p.mode);
+        setCurrentLevel(p.level);
+        if (p.source) setCurrentSource(p.source);
+      }),
+
+      reonBridge.on("telemetry", (p) => {
+        if (!p) return;
+        setTemps({
+          plate: p.plate ?? 0,
+          sink: p.sink ?? 0,
+          board: p.board ?? 0,
+          ambient: p.ambient ?? 0,
+        });
+        setHasTemps(true);
+      }),
+
+      reonBridge.on("log.line", (p) => {
+        if (!p) return;
+        setLog((prev) => {
+          const next = [...prev, { t: p.t || fmtTime(), k: p.kind || "info", msg: p.msg || "" }];
+          return next.slice(-200);
+        });
+      }),
+
+      reonBridge.on("settings", (p) => {
+        if (!p) return;
+        if (p.oscPort) setOscPort(p.oscPort);
+        if (p.addresses) setAddresses((a) => ({ ...a, ...p.addresses }));
+        if (typeof p.heatTouchLevel === "number") setHeatLevel(p.heatTouchLevel);
+        if (typeof p.coldWaterLevel === "number") setColdLevel(p.coldWaterLevel);
+        if (typeof p.startMinimised === "boolean") setStartMin(p.startMinimised);
+        if (typeof p.autoConnectOnStart === "boolean") setAutoConn(p.autoConnectOnStart);
+      }),
+    ];
+
+    return () => unsubs.forEach((u) => u());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hosted]);
+
+  /* ---------- Local-only derivation (when no bridge: simulate) ---------- */
+  useEffect(() => {
+    if (hosted) return;
+    let mode = "Stop", level = 0;
+    if (manualOverride) {
+      mode = manualMode;
+      level = manualMode === "Stop" ? 0 : manualLevel;
+    } else {
+      if (oscIn.PFHotHigh >= 1) { mode = "Heat"; level = heatLevel; }
+      else if (oscIn.water >= 1) { mode = "Cool"; level = coldLevel; }
+      else if (oscIn.cold > 0.05) { mode = "Cool"; level = Math.max(1, Math.round(oscIn.cold * LEVEL_MAX)); }
+      else if (oscIn.heat > 0.05) { mode = "Heat"; level = Math.max(1, Math.round(oscIn.heat * LEVEL_MAX)); }
+      else { mode = "Stop"; level = 0; }
+    }
+    if (mode !== currentMode || level !== currentLevel) {
+      setCurrentMode(mode);
+      setCurrentLevel(level);
+      if (connState === "connected") {
+        const msg = mode === "Stop" ? "→ Stop" : `→ ${mode} L${level}`;
+        appendLog(mode === "Stop" ? "stop" : mode.toLowerCase(), msg);
+      }
+    }
+  }, [hosted, manualOverride, manualMode, manualLevel, oscIn, heatLevel, coldLevel, connState, currentMode, currentLevel, appendLog]);
+
+  /* ---------- Sim only: drive temperatures, occasional OSC inputs ---------- */
+  useEffect(() => {
+    if (hosted) return;
+    const id = setInterval(() => {
+      setTemps((t) => {
+        const target = currentMode === "Cool"
+          ? 30.69 - currentLevel * 2.2
+          : currentMode === "Heat"
+            ? 30.69 + currentLevel * 3.6
+            : 30.69 + (Math.random() - 0.5) * 0.6;
+        const lerp = (a, b, k) => a + (b - a) * k;
+        const drift = () => (Math.random() - 0.5) * 0.18;
+        const k = 0.18;
+        const plate = lerp(t.plate || 31, target, k) + drift();
+        const sink = lerp(t.sink || 31, target * 0.95 + 1.6, k * 0.85) + drift();
+        const board = lerp(t.board || 31, 31 + currentLevel * 0.4, 0.1) + drift() * 0.3;
+        const ambient = lerp(t.ambient || 30, 30.69, 0.05) + drift() * 0.4;
+        return { plate, sink, board, ambient };
+      });
+      setHasTemps(true);
+    }, 700);
+    return () => clearInterval(id);
+  }, [hosted, currentMode, currentLevel]);
+
+  useEffect(() => {
+    if (hosted || !oscRunning || connState !== "connected") return;
+    const id = setInterval(() => {
+      if (Math.random() < 0.08) {
+        const which = ["PFHotHigh", "water", "cold", "heat"][Math.floor(Math.random() * 4)];
+        setOscIn((o) => {
+          const next = { ...o };
+          if (which === "PFHotHigh" || which === "water") next[which] = next[which] ? 0 : 1;
+          else next[which] = Math.random() < 0.4 ? 0 : Math.round(Math.random() * 100) / 100;
+          return next;
+        });
+      }
+    }, 2400);
+    return () => clearInterval(id);
+  }, [hosted, oscRunning, connState]);
+
+  /* ---------- handlers — send to bridge in hosted mode, fall back to local state in sim ---------- */
+  const doConnect = () => {
+    if (hosted) { send("connect", null); return; }
+    setConnState("connecting");
+    appendLog("info", "Connecting to " + macAddr + " …");
+    setTimeout(() => { setConnState("connected"); setConnectedAt(Date.now()); appendLog("ok", "Connected and authed."); }, 900);
+  };
+  const doDisconnect = () => {
+    if (hosted) { send("disconnect", null); return; }
+    setConnState("disconnected"); setConnectedAt(null); appendLog("info", "Disconnected.");
+  };
+  const doPair = () => {
+    if (hosted) { send("pair", null); return; }
+    setConnState("pairing"); appendLog("info", "Waiting for device in pair mode …");
+    setTimeout(() => { setConnState("connected"); setConnectedAt(Date.now()); appendLog("ok", "Paired. Connected and authed."); }, 1600);
+  };
+  const toggleOsc = () => {
+    if (hosted) { send(oscRunning ? "osc.stop" : "osc.start", { port: oscPort }); return; }
+    if (oscRunning) { setOscRunning(false); appendLog("info", "OSC server stopped."); }
+    else { setOscRunning(true); appendLog("info", `OSC listening on UDP ${oscPort}`); }
+  };
+
+  const onPortChange = (v) => {
+    setOscPort(v);
+    if (hosted && oscRunning) send("osc.start", { port: v });
+  };
+
+  const onAddressChange = (key, value) => {
+    setAddresses((a) => ({ ...a, [key]: value }));
+    if (hosted) send("osc.setAddress", { key, address: value });
+  };
+
+  const onOverrideChange = (v) => {
+    setManualOverride(v);
+    if (hosted) send("manual.toggle", { enabled: v });
+  };
+  const onManualModeChange = (m) => {
+    setManualMode(m);
+    if (hosted && manualOverride) send("manual.set", { mode: m, level: m === "Stop" ? 0 : manualLevel });
+  };
+  const onManualLevelChange = (l) => {
+    setManualLevel(l);
+    if (hosted && manualOverride && manualMode !== "Stop") send("manual.set", { mode: manualMode, level: l });
+  };
+  const onHeatLevelChange = (v) => { setHeatLevel(v); if (hosted) send("preset.heat", { level: v }); };
+  const onColdLevelChange = (v) => { setColdLevel(v); if (hosted) send("preset.cold", { level: v }); };
+  const onStartMinChange = (v) => { setStartMin(v); if (hosted) send("options.set", { startMinimised: v }); };
+  const onAutoConnChange = (v) => { setAutoConn(v); if (hosted) send("options.set", { autoConnect: v }); };
+  const onClearLog = () => { setLog([]); if (hosted) send("log.clear", null); };
+
+  /* ---------- derived ----- */
+  const accent = currentMode === "Cool" ? "#4ab8ff" : currentMode === "Heat" ? "#ff7a3d" : "#7c8694";
+  useEffect(() => {
+    document.documentElement.style.setProperty("--accent", accent);
+  }, [accent]);
+
+  const connPillProps = {
+    connected: { cls: "connected", dot: "", label: "Connected" },
+    connecting: { cls: "", dot: "", label: "Connecting…" },
+    pairing: { cls: "", dot: "", label: "Pairing…" },
+    disconnected: { cls: "disconnected", dot: "off", label: "Disconnected" },
+  }[connState];
+
+  /* ----- render ----- */
+  return (
+    <div className="app">
+      {/* Native window chrome is used; the in-app chrome strip is hidden. */}
+      <main className="main" style={{gridTemplateRows: "1fr auto"}}>
+        {/* Controls panel */}
+        <section className="controls-panel">
+          {/* Reon connection */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>Reon connection</div>
+              <span className={`pill ${connPillProps.cls}`}>
+                <span className={`pulse ${connPillProps.dot}`}/>
+                {connPillProps.label}
+              </span>
+            </div>
+            <div className="card-body">
+              <div className="row between">
+                <span className="mac-addr">{connState === "connected" ? macAddr : "—"}</span>
+                <div className="actions">
+                  <button className="btn" onClick={doConnect}
+                    disabled={connState === "connected" || connState === "connecting"}>
+                    <Icon name="link"/> Connect
+                  </button>
+                  <button className="btn" onClick={doDisconnect} disabled={connState !== "connected"}>
+                    <Icon name="unlink"/> Disconnect
+                  </button>
+                  <button className="btn" onClick={doPair} disabled={connState === "pairing"}>
+                    <Icon name="bluetooth"/> Pair…
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* OSC server */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>OSC server</div>
+              <span className={`pill ${oscRunning ? "connected" : "disconnected"}`}>
+                <span className={`pulse ${oscRunning ? "" : "off"}`} style={oscRunning ? {background: "var(--accent)", boxShadow: `0 0 0 0 ${accent}80`} : null}/>
+                {oscRunning ? `Listening on UDP ${oscPort}` : "Stopped"}
+              </span>
+            </div>
+            <div className="card-body">
+              <div className="row" style={{gap: 14}}>
+                <span className="field-label" style={{width: 70}}>UDP port</span>
+                <NumInput value={oscPort} onChange={onPortChange} min={1024} max={65535} step={1} width={96}/>
+                <button className={`btn ${oscRunning ? "danger" : "primary"}`} onClick={toggleOsc}>
+                  {oscRunning ? <><Icon name="stop"/> Stop</> : <><Icon name="play"/> Start</>}
+                </button>
+              </div>
+
+              <div style={{height: 1, background: "var(--border)", margin: "4px 0 2px"}}/>
+
+              <div className="card-title" style={{padding: "4px 0", textTransform: "none", letterSpacing: 0, fontSize: 11.5, color: "var(--text-dim)", fontWeight: 500}}>
+                OSC addresses <span style={{color: "var(--text-muted)", fontWeight: 400}}>— edit to match your sender</span>
+              </div>
+
+              {[
+                { key: "PFHotHigh", label: "PFHotHigh", type: "bool" },
+                { key: "water",     label: "water",     type: "bool" },
+                { key: "cold",      label: "cold",      type: "float" },
+                { key: "heat",      label: "heat",      type: "float" },
+              ].map((row) => (
+                <div className="osc-row" key={row.key}>
+                  <span className="osc-label">{row.label} <span className={`tag ${row.type}`}>{row.type}</span></span>
+                  <input className="input mono" value={addresses[row.key]} onChange={(e) => onAddressChange(row.key, e.target.value)}/>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Manual control */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>Manual control</div>
+              <label className="toggle">
+                <input type="checkbox" checked={manualOverride} onChange={(e) => onOverrideChange(e.target.checked)}/>
+                <span className="toggle-track"/>
+                <span className={`toggle-label ${manualOverride ? "strong" : ""}`}>Override OSC</span>
+              </label>
+            </div>
+            <div className="card-body" style={{opacity: manualOverride ? 1 : 0.5, pointerEvents: manualOverride ? "auto" : "none", transition: "opacity 0.2s"}}>
+              <div className="row" style={{gap: 16}}>
+                <span className="field-label" style={{width: 50}}>Mode</span>
+                <div className="seg">
+                  {MODES.map((m) => (
+                    <button key={m} className={`seg-btn ${manualMode === m ? `active ${m.toLowerCase()}` : ""}`}
+                      onClick={() => onManualModeChange(m)}>{m}</button>
+                  ))}
+                </div>
+                <span className="field-label" style={{width: 50, marginLeft: 12}}>Level</span>
+                <LevelBars value={manualLevel} onChange={onManualLevelChange} color={manualMode === "Cool" ? "#4ab8ff" : manualMode === "Heat" ? "#ff7a3d" : null}/>
+              </div>
+            </div>
+          </div>
+
+          {/* Preset levels */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>Preset levels for OSC triggers</div>
+            </div>
+            <div className="card-body">
+              <div className="row between">
+                <span className="osc-label">
+                  Heat Touch <span className="tag" style={{color: "var(--heat-2)"}}>when PFHotHigh = 1</span>
+                </span>
+                <LevelBars value={heatLevel} onChange={onHeatLevelChange} color="#ff7a3d"/>
+              </div>
+              <div className="row between">
+                <span className="osc-label">
+                  Cold Water <span className="tag" style={{color: "var(--cool)"}}>when water = 1</span>
+                </span>
+                <LevelBars value={coldLevel} onChange={onColdLevelChange} color="#4ab8ff"/>
+              </div>
+            </div>
+          </div>
+
+          {/* Options */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>Options</div>
+              <div className="actions">
+                <button className="btn ghost" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
+                  <Icon name={theme === "dark" ? "sun" : "moon"} size={12}/>
+                </button>
+                <button className="btn ghost" onClick={() => setShowSparkline((v) => !v)} title="Toggle sparkline">
+                  {showSparkline ? "Hide sparkline" : "Show sparkline"}
+                </button>
+              </div>
+            </div>
+            <div className="card-body" style={{flexDirection: "row", gap: 24, flexWrap: "wrap"}}>
+              <label className="check">
+                <input type="checkbox" checked={startMin} onChange={(e) => onStartMinChange(e.target.checked)}/>
+                <span className="check-box"/>
+                Start minimised to tray
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={autoConn} onChange={(e) => onAutoConnChange(e.target.checked)}/>
+                <span className="check-box"/>
+                Auto-connect to Reon on start
+              </label>
+            </div>
+          </div>
+        </section>
+
+        {/* Device panel */}
+        <section className="device-panel">
+          <div className="device-toolbar">
+            <div className="device-toolbar-left">
+              <span className="mini-stat">{currentSource === "Manual" ? "MANUAL" : "OSC"}</span>
+            </div>
+            <div className="device-toolbar-right">
+              {fw && <span className="mini-stat">FW {fw}</span>}
+              {battery != null && <span className="mini-stat">⛁ {battery}%</span>}
+            </div>
+          </div>
+
+          <div className="device-stage">
+            <ReonDevice mode={currentMode} level={currentLevel} plate={temps.plate} ambient={temps.ambient}/>
+          </div>
+
+          <div className="device-info">
+            <div className="mode-display">
+              <span className={`mode-text ${currentMode.toLowerCase()}`}>
+                {currentMode}{currentMode !== "Stop" ? ` L${currentLevel}` : ""}
+              </span>
+              <span className="mode-meta">
+                <div>SOURCE · <strong>{currentSource === "Manual" || manualOverride ? "Manual" : "OSC"}</strong></div>
+                <div style={{marginTop: 2}}>UPTIME · <strong>{fmtUptime(uptime)}</strong></div>
+              </span>
+            </div>
+
+            <div className="telemetry">
+              {[
+                { l: "Plate · skin", v: temps.plate },
+                { l: "Sink",         v: temps.sink  },
+                { l: "Board",        v: temps.board },
+                { l: "Ambient",      v: temps.ambient },
+              ].map((c) => (
+                <div className="tel-cell" key={c.l}>
+                  <div className="tel-label">{c.l}</div>
+                  <div className="tel-value">
+                    {hasTemps ? c.v.toFixed(2) : "—"}
+                    {hasTemps && <span className="tel-unit">°C</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {showSparkline && hasTemps && (
+              <Sparkline data={plateHistory} color={accent}/>
+            )}
+
+            <div className="osc-readout">
+              {[
+                { k: "PFHotHigh", v: oscIn.PFHotHigh, fmt: (v) => v },
+                { k: "water",     v: oscIn.water,     fmt: (v) => v },
+                { k: "cold",      v: oscIn.cold,      fmt: (v) => Number(v).toFixed(2) },
+                { k: "heat",      v: oscIn.heat,      fmt: (v) => Number(v).toFixed(2) },
+              ].map((c) => (
+                <div className="osc-readout-cell" key={c.k}>
+                  <div className="osc-readout-label">{c.k}</div>
+                  <div className={`osc-readout-value ${Number(c.v) > 0 ? "active" : ""}`}>{c.fmt(c.v)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Log */}
+        <section className={`log-panel ${compactLog ? "compact" : ""}`}>
+          <div className="log-head">
+            <div className="log-tabs">
+              <span className="log-tab active">Log</span>
+            </div>
+            <div className="log-actions">
+              <button className="btn ghost" style={{padding: "4px 8px"}} onClick={() => setCompactLog((v) => !v)}>
+                <Icon name={compactLog ? "chevU" : "chevD"} size={12}/>
+              </button>
+              <button className="btn ghost" style={{padding: "4px 8px"}} onClick={onClearLog}>
+                <Icon name="trash" size={12}/>
+              </button>
+            </div>
+          </div>
+          <div className="log-body" ref={logBodyRef}>
+            {log.map((l, i) => (
+              <div className={`log-line ${l.k}`} key={i}>
+                <span className="log-time">{l.t}</span>
+                <span className="log-icon">
+                  {l.k === "ok" ? "✓" : l.k === "err" ? "✕" : l.k === "cool" ? "❄" : l.k === "heat" ? "🔥" : l.k === "stop" ? "■" : "›"}
+                </span>
+                <span className="log-msg">{typeof l.msg === "string" ? l.msg : l.msg}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ReonOSC</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Theme default: dark. Re-saved into localStorage via the UI. -->
+  <script>
+    window.__TWEAKS_DEFAULTS = { theme: "dark", showSparkline: true, compactLog: false };
+    document.documentElement.dataset.theme = (localStorage.getItem('reon.theme') || window.__TWEAKS_DEFAULTS.theme);
+  </script>
+
+  <!-- Bridge to the C# host (WebView2). Loaded before the React app. -->
+  <script src="reon-bridge.js"></script>
+  <script type="text/babel" src="device.jsx"></script>
+  <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>

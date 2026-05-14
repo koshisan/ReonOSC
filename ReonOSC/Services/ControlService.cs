@@ -25,6 +25,9 @@ public sealed class ControlService : IAsyncDisposable
 
     public event EventHandler<ResolvedCommand>? CommandSent;
     public event EventHandler<string>? Log;
+    /// <summary>Fires whenever any OSC input value changes. Snapshot keys match
+    /// the GUI contract: "PFHotHigh", "water", "cold", "heat".</summary>
+    public event EventHandler<IReadOnlyDictionary<string, float>>? InputsChanged;
 
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly TimeSpan _minWriteGap = TimeSpan.FromMilliseconds(120);
@@ -91,8 +94,18 @@ public sealed class ControlService : IAsyncDisposable
     private void UpdateInput(InputSource src, float value)
     {
         if (!_inputs.Set(src, value)) return;
+        InputsChanged?.Invoke(this, Snapshot());
         _ = ReconcileAsync();
     }
+
+    /// <summary>Snapshot of the current OSC inputs by GUI-facing key.</summary>
+    public IReadOnlyDictionary<string, float> Snapshot() => new Dictionary<string, float>
+    {
+        ["PFHotHigh"] = _inputs.Get(InputSource.PfHotHigh),
+        ["water"]     = _inputs.Get(InputSource.Water),
+        ["cold"]      = _inputs.Get(InputSource.Cold),
+        ["heat"]      = _inputs.Get(InputSource.Heat),
+    };
 
     /// <summary>Resolve the current target and push it to the device if it differs from the last sent.</summary>
     public async Task ReconcileAsync(CancellationToken ct = default)

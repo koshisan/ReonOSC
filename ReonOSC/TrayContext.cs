@@ -65,27 +65,19 @@ public sealed class TrayContext : ApplicationContext
         };
 
         // Ensure the form handle exists even if we never show the window, so
-        // BeginInvoke for log events works correctly.
+        // the WebView2 can initialise and log events have somewhere to land.
         _ = _form.Handle;
 
         if (_settings.OscPort > 0)
         {
-            try { _service.StartOsc(); }
-            catch
-            {
-                // Port might be in use. The form's log will be empty at this point
-                // because the handle isn't yet created; user will see no OSC running
-                // and can retry from the GUI.
-            }
+            try { _service.StartOsc(); } catch { /* surfaced via bridge log */ }
         }
 
         if (!_settings.StartMinimised)
             ShowForm();
 
-        // Defer auto-connect onto the UI thread post-construction so the log
-        // captures it. Works whether the form is visible or hidden.
-        if (_settings.AutoConnectOnStart)
-            _form.BeginInvoke((Action)(async () => { try { await _form.ConnectAsync(); } catch { /* logged */ } }));
+        // Auto-connect is now triggered by the bridge when the UI signals
+        // ui.ready (see WebViewBridge.OnUiReady).
     }
 
     private void ShowForm()
