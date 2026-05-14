@@ -156,18 +156,17 @@ public sealed class PfSignalReader : IDisposable
             int sx = Math.Clamp((int)(desc.Width  * SamplePointX) - SampleRegion / 2, 0, (int)desc.Width  - SampleRegion);
             int sy = Math.Clamp((int)(desc.Height * SamplePointY) - SampleRegion / 2, 0, (int)desc.Height - SampleRegion);
 
-            EnsureStaging(desc.Format);
-            // Fully-qualified Box: Vortice.Direct3D11.Box collides with
-            // other Box-named types in scope (e.g. WinForms / System.Drawing).
-            _context.CopySubresourceRegion(
-                _staging!, 0, 0, 0, 0,
-                src, 0,
-                new Vortice.Direct3D11.Box(sx, sy, 0, sx + SampleRegion, sy + SampleRegion, 1));
+            EnsureStaging(desc);
+            // CopyResource over a same-size staging texture — wasteful but
+            // avoids Vortice version drift over where Box lives. At 25 Hz on
+            // a ~2160x2400 HMD texture, this is roughly 500 MB/s of GPU<->CPU
+            // copy bandwidth, which a modern PCIe bus shrugs off.
+            _context.CopyResource(_staging!, src);
 
             var map = _context.Map(_staging!, 0, MapMode.Read);
             try
             {
-                sample = AveragePixel(map, desc.Format);
+                sample = AveragePixel(map, desc.Format, sx, sy);
                 return true;
             }
             finally
@@ -181,17 +180,22 @@ public sealed class PfSignalReader : IDisposable
         }
     }
 
-    private void EnsureStaging(Format format)
+    private void EnsureStaging(Texture2DDescription sourceDesc)
     {
-        if (_staging is not null && _staging.Description.Format == format) return;
-        _staging?.Dispose();
+        if (_staging is not null)
+        {
+            var sd = _staging.Description;
+            if (sd.Format == sourceDesc.Format && sd.Width == sourceDesc.Width && sd.Height == sourceDesc.Height)
+                return;
+            _staging.Dispose();
+        }
         _staging = _device!.CreateTexture2D(new Texture2DDescription
         {
-            Width = SampleRegion,
-            Height = SampleRegion,
+            Width = sourceDesc.Width,
+            Height = sourceDesc.Height,
             MipLevels = 1,
             ArraySize = 1,
-            Format = format,
+            Format = sourceDesc.Format,
             SampleDescription = new SampleDescription(1, 0),
             Usage = ResourceUsage.Staging,
             BindFlags = BindFlags.None,
@@ -200,16 +204,17 @@ public sealed class PfSignalReader : IDisposable
         });
     }
 
-    private static PfSignalSample AveragePixel(MappedSubresource map, Format format)
+    private static PfSignalSample AveragePixel(MappedSubresource map, Format format, int sx, int sy)
     {
         int n = SampleRegion * SampleRegion;
         long r = 0, g = 0, b = 0;
         unsafe
         {
-            byte* row = (byte*)map.DataPointer;
+            byte* basePtr = (byte*)map.DataPointer;
             for (int y = 0; y < SampleRegion; y++)
             {
-                byte* p = row + y * map.RowPitch;
+                byte* row = basePtr + (sy + y) * map.RowPitch;
+                byte* p = row + sx * 4;
                 for (int x = 0; x < SampleRegion; x++)
                 {
                     byte b0 = p[0], b1 = p[1], b2 = p[2];
