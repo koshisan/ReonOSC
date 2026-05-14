@@ -51,29 +51,14 @@ public sealed class PfSignalReader : IDisposable
     {
         if (IsRunning) return;
 
-        // A D3D11 device is needed by both backends — create once.
         if (!CreateD3D11Device()) return;
 
-        // Prefer the OpenVR mirror — zero permission UI, no extra desktop copy.
-        if (TryInitOpenVR())
-        {
-            ActiveBackend = CaptureBackend.OpenVrMirror;
-        }
-        else if (TryInitDesktopDuplication())
-        {
-            ActiveBackend = CaptureBackend.DesktopDuplication;
-        }
-        else
-        {
-            Logf("PF signal: no capture backend available. " +
-                 "Start SteamVR for the VR path, or launch VRChat in desktop mode for the fallback.");
-            Cleanup();
-            return;
-        }
-
+        // Don't fail Start if no backend is currently available — the loop
+        // continuously probes for one, so launching ReonOSC before VRChat /
+        // SteamVR is fine. The current backend is exposed via ActiveBackend.
         _cts = new CancellationTokenSource();
         _loopTask = Task.Run(() => Loop(_cts.Token));
-        Logf($"PF signal reader started ({ActiveBackend}, ~{1000 / Math.Max(1, PollInterval.TotalMilliseconds):0} Hz poll).");
+        Logf($"PF signal reader started (~{1000 / Math.Max(1, PollInterval.TotalMilliseconds):0} Hz, probing backends).");
     }
 
     public void Stop()
@@ -192,16 +177,26 @@ public sealed class PfSignalReader : IDisposable
                 return false;
             }
 
-            // Pick the monitor the VRChat window is currently on so we only
-            // duplicate the relevant output.
+            // Vortice's COM methods take an out-param and return a Result; that's
+            // the canonical shape in v3.6.x.
             using var dxgiDevice = _device!.QueryInterface<IDXGIDevice>();
-            using var adapter = dxgiDevice.GetAdapter();
-            var outputIndex = FindOutputContainingWindow(adapter, _vrchatHwnd);
-            using var output = adapter.GetOutput(outputIndex);
-            using var output1 = output.QueryInterface<IDXGIOutput1>();
-            _duplication = output1.DuplicateOutput(_device);
+            var hr = dxgiDevice.GetAdapter(out var adapter);
+            if (hr.Failure || adapter is null) { Logf($"PF signal: dxgiDevice.GetAdapter failed: 0x{hr.Code:x8}"); return false; }
 
-            return true;
+            try
+            {
+                int outIdx = FindOutputContainingWindow(adapter, _vrchatHwnd);
+                hr = adapter.EnumOutputs((uint)outIdx, out var output);
+                if (hr.Failure || output is null) { Logf($"PF signal: adapter.EnumOutputs failed: 0x{hr.Code:x8}"); return false; }
+                try
+                {
+                    using var output1 = output.QueryInterface<IDXGIOutput1>();
+                    _duplication = output1.DuplicateOutput(_device);
+                    return true;
+                }
+                finally { output.Dispose(); }
+            }
+            finally { adapter.Dispose(); }
         }
         catch (Exception ex)
         {
@@ -258,19 +253,58 @@ public sealed class PfSignalReader : IDisposable
 
     // -------- shared loop / staging / averaging -----------------------------
 
+    private static readonly TimeSpan BackendRecheckInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>Cheap process-level probe — avoids paying the cost of an OpenVR
+    /// Init() handshake when SteamVR is clearly not even running.</summary>
+    private static bool IsSteamVrRunning()
+    {
+        try { return System.Diagnostics.Process.GetProcessesByName("vrserver").Length > 0; }
+        catch { return false; }
+    }
+
     private async Task Loop(CancellationToken ct)
     {
+        DateTime nextBackendCheck = DateTime.MinValue;
+        int consecutiveFailures = 0;
+
         while (!ct.IsCancellationRequested)
         {
             try
             {
+                // Periodically re-pick the backend. Two situations to handle:
+                //   - We have no backend and one is now available.
+                //   - We're on DXGI but SteamVR just came up — switch to OpenVR,
+                //     which is preferred (cheaper, no permission UI, exact pixel
+                //     coords from the compositor instead of cropped client rect).
+                if (DateTime.UtcNow >= nextBackendCheck)
+                {
+                    nextBackendCheck = DateTime.UtcNow + BackendRecheckInterval;
+                    PickBestBackend();
+                }
+
                 bool ok = ActiveBackend switch
                 {
-                    CaptureBackend.OpenVrMirror      => TrySampleOpenVR(out var s) && Handle(s),
-                    CaptureBackend.DesktopDuplication => TrySampleDxgi(out var s) && Handle(s),
+                    CaptureBackend.OpenVrMirror       => TrySampleOpenVR(out var s) && Handle(s),
+                    CaptureBackend.DesktopDuplication => TrySampleDxgi(out var s2) && Handle(s2),
                     _ => false,
                 };
-                _ = ok; // suppress warning
+
+                if (ok) consecutiveFailures = 0;
+                else
+                {
+                    consecutiveFailures++;
+                    // ~1s of failures on an active backend → drop it so the
+                    // next backend check can re-init from scratch (handles
+                    // VRChat closing, SteamVR exit, etc.).
+                    if (consecutiveFailures >= 25 && ActiveBackend != CaptureBackend.None)
+                    {
+                        Logf($"PF: {ActiveBackend} stopped delivering frames. Re-probing …");
+                        DropCurrentBackend();
+                        nextBackendCheck = DateTime.MinValue;
+                        consecutiveFailures = 0;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -280,6 +314,62 @@ public sealed class PfSignalReader : IDisposable
             try { await Task.Delay(PollInterval, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
         }
+    }
+
+    /// <summary>
+    /// Choose / upgrade the capture backend. Priority is OpenVR &gt; DXGI &gt; none.
+    /// If we're already on the highest-priority available backend, no-op.
+    /// </summary>
+    private void PickBestBackend()
+    {
+        // Already on OpenVR — best possible, no work needed.
+        if (ActiveBackend == CaptureBackend.OpenVrMirror) return;
+
+        // OpenVR became available — switch up.
+        if (IsSteamVrRunning() && TryInitOpenVR())
+        {
+            if (ActiveBackend == CaptureBackend.DesktopDuplication)
+            {
+                Logf("SteamVR came up — switching from Desktop Duplication to OpenVR mirror.");
+                try { _duplication?.Dispose(); } catch { }
+                _duplication = null;
+                _vrchatHwnd = IntPtr.Zero;
+            }
+            else
+            {
+                Logf("OpenVR mirror backend active.");
+            }
+            ActiveBackend = CaptureBackend.OpenVrMirror;
+            return;
+        }
+
+        // Already on DXGI — fine, keep going.
+        if (ActiveBackend == CaptureBackend.DesktopDuplication) return;
+
+        // Nothing yet — try DXGI.
+        if (TryInitDesktopDuplication())
+        {
+            ActiveBackend = CaptureBackend.DesktopDuplication;
+            Logf("Desktop Duplication backend active (capturing VRChat window).");
+        }
+    }
+
+    /// <summary>Tear down whichever backend is currently active so PickBestBackend
+    /// can start fresh. Doesn't touch the shared D3D11 device.</summary>
+    private void DropCurrentBackend()
+    {
+        switch (ActiveBackend)
+        {
+            case CaptureBackend.OpenVrMirror:
+                ShutdownOpenVR();
+                break;
+            case CaptureBackend.DesktopDuplication:
+                try { _duplication?.Dispose(); } catch { }
+                _duplication = null;
+                _vrchatHwnd = IntPtr.Zero;
+                break;
+        }
+        ActiveBackend = CaptureBackend.None;
     }
 
     private bool Handle(PfSignalSample sample)
@@ -411,25 +501,25 @@ public sealed class PfSignalReader : IDisposable
 
     private static int FindOutputContainingWindow(IDXGIAdapter adapter, IntPtr hwnd)
     {
-        // Fallback to output 0 if we can't determine the right monitor.
         if (!GetClientRect(hwnd, out var client)) return 0;
         var origin = new POINT();
         if (!ClientToScreen(hwnd, ref origin)) return 0;
         int centerX = origin.X + (client.Right - client.Left) / 2;
         int centerY = origin.Y + (client.Bottom - client.Top) / 2;
 
-        for (int i = 0; ; i++)
+        for (uint i = 0; i < 8; i++)   // hard cap: no machine has >8 monitors plugged into one adapter
         {
+            var hr = adapter.EnumOutputs(i, out var output);
+            if (hr.Failure || output is null) return 0;
             try
             {
-                using var output = adapter.GetOutput(i);
-                var desc = output.Description;
-                var r = desc.DesktopCoordinates;
+                var r = output.Description.DesktopCoordinates;
                 if (centerX >= r.Left && centerX < r.Right && centerY >= r.Top && centerY < r.Bottom)
-                    return i;
+                    return (int)i;
             }
-            catch (SharpGenException) { return 0; }
+            finally { output.Dispose(); }
         }
+        return 0;
     }
 }
 
