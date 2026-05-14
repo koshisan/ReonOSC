@@ -45,6 +45,12 @@ public sealed class WebViewBridge : IDisposable
             plate = t.SkinPlate, sink = t.Heatsink, board = t.Board, ambient = t.Ambient,
         });
         _service.InputsChanged += (_, snapshot) => PushInputs(snapshot);
+        _service.PfSignal.SignalChanged += (_, sample) => Push("pf.signal", new
+        {
+            hex = sample.ToString(),
+            r = sample.R, g = sample.G, b = sample.B,
+            running = _service.PfSignal.IsRunning,
+        });
     }
 
     public void Dispose()
@@ -105,6 +111,7 @@ public sealed class WebViewBridge : IDisposable
             case "preset.heat":    PresetHeat(payload); break;
             case "preset.cold":    PresetCold(payload); break;
             case "options.set":    SetOptions(payload); break;
+            case "pfHook.toggle":  TogglePfHook(payload); break;
             case "log.clear":      /* the UI owns its own log buffer */ break;
             default: Push("log.line", new { t = Ts(), kind = "err", msg = $"Unknown command: {cmd}" }); break;
         }
@@ -128,7 +135,9 @@ public sealed class WebViewBridge : IDisposable
             coldWaterLevel = _settings.ColdWaterLevel,
             startMinimised = _settings.StartMinimised,
             autoConnectOnStart = _settings.AutoConnectOnStart,
+            enablePfSignalHook = _settings.EnablePfSignalHook,
         });
+        Push("pf.signal", new { running = _service.PfSignal.IsRunning, hex = "—" });
         PushOscState();
         Push("conn.state", new
         {
@@ -334,6 +343,28 @@ public sealed class WebViewBridge : IDisposable
             _settings.Save();
             _service.ApplySettings(_settings);
         }
+    }
+
+    private void TogglePfHook(JsonElement payload)
+    {
+        var enabled = payload.ValueKind == JsonValueKind.Object
+                      && payload.TryGetProperty("enabled", out var e)
+                      && e.ValueKind is JsonValueKind.True or JsonValueKind.False
+                      && e.GetBoolean();
+
+        _settings.EnablePfSignalHook = enabled;
+        _settings.Save();
+
+        if (enabled)
+        {
+            try { _service.PfSignal.Start(); }
+            catch (Exception ex) { Push("log.line", new { t = Ts(), kind = "err", msg = $"PF hook start failed: {ex.Message}" }); }
+        }
+        else
+        {
+            _service.PfSignal.Stop();
+        }
+        Push("pf.signal", new { running = _service.PfSignal.IsRunning, hex = "—" });
     }
 
     private void SetOptions(JsonElement payload)

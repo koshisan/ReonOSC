@@ -13,6 +13,7 @@ public sealed class ControlService : IAsyncDisposable
 {
     public ReonClient Reon { get; } = new();
     public OscServer Osc { get; } = new();
+    public PfSignalReader PfSignal { get; } = new();
     public Settings Settings { get; private set; }
     private readonly OscInputs _inputs = new();
 
@@ -38,6 +39,15 @@ public sealed class ControlService : IAsyncDisposable
         Osc.MessageReceived += OnOscMessage;
         Osc.Log += (_, msg) => Log?.Invoke(this, msg);
         Reon.Log += (_, msg) => Log?.Invoke(this, msg);
+        PfSignal.Log += (_, msg) => Log?.Invoke(this, msg);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Osc.Dispose();
+        PfSignal.Dispose();
+        await Reon.DisposeAsync().ConfigureAwait(false);
+        _writeLock.Dispose();
     }
 
     public void ApplySettings(Settings settings)
@@ -155,10 +165,4 @@ public sealed class ControlService : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        Osc.Dispose();
-        await Reon.DisposeAsync().ConfigureAwait(false);
-        _writeLock.Dispose();
-    }
 }

@@ -22,6 +22,10 @@ public sealed class Settings
     public bool StartMinimised { get; set; } = false;
     public bool AutoConnectOnStart { get; set; } = true;
 
+    /// <summary>Enable the experimental hook that reads the Pebble Feel signal
+    /// pixel from the SteamVR compositor mirror texture. Requires SteamVR running.</summary>
+    public bool EnablePfSignalHook { get; set; } = false;
+
     /// <summary>Last-known Reon BLE MAC. Used for fast reconnect; otherwise we scan by name.</summary>
     public string? LastKnownMac { get; set; }
 

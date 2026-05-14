@@ -190,6 +190,8 @@ function App() {
   // Options
   const [startMin, setStartMin] = useState(false);
   const [autoConn, setAutoConn] = useState(true);
+  const [pfHook, setPfHook] = useState(false);
+  const [pfState, setPfState] = useState({ running: false, hex: "—" });
 
   // Incoming OSC inputs
   const [oscIn, setOscIn] = useState({ PFHotHigh: 0, water: 0, cold: 0.0, heat: 0.0 });
@@ -310,6 +312,12 @@ function App() {
         if (typeof p.coldWaterLevel === "number") setColdLevel(p.coldWaterLevel);
         if (typeof p.startMinimised === "boolean") setStartMin(p.startMinimised);
         if (typeof p.autoConnectOnStart === "boolean") setAutoConn(p.autoConnectOnStart);
+        if (typeof p.enablePfSignalHook === "boolean") setPfHook(p.enablePfSignalHook);
+      }),
+
+      reonBridge.on("pf.signal", (p) => {
+        if (!p) return;
+        setPfState({ running: !!p.running, hex: p.hex ?? "—" });
       }),
     ];
 
@@ -429,6 +437,7 @@ function App() {
   const onColdLevelChange = (v) => { setColdLevel(v); if (hosted) send("preset.cold", { level: v }); };
   const onStartMinChange = (v) => { setStartMin(v); if (hosted) send("options.set", { startMinimised: v }); };
   const onAutoConnChange = (v) => { setAutoConn(v); if (hosted) send("options.set", { autoConnect: v }); };
+  const onPfHookChange   = (v) => { setPfHook(v); if (hosted) send("pfHook.toggle", { enabled: v }); };
   const onClearLog = () => { setLog([]); if (hosted) send("log.clear", null); };
 
   /* ---------- derived ----- */
@@ -600,6 +609,16 @@ function App() {
                 <input type="checkbox" checked={autoConn} onChange={(e) => onAutoConnChange(e.target.checked)}/>
                 <span className="check-box"/>
                 Auto-connect to Reon on start
+              </label>
+              <label className="check" title="Reads the Pebble Feel signal pixel from the SteamVR compositor mirror texture. Experimental.">
+                <input type="checkbox" checked={pfHook} onChange={(e) => onPfHookChange(e.target.checked)}/>
+                <span className="check-box"/>
+                Pebble Feel signal hook
+                {pfHook && (
+                  <span className="tag mono" style={{marginLeft: 8, color: "var(--text-dim)"}}>
+                    {pfState.running ? pfState.hex : "—"}
+                  </span>
+                )}
               </label>
             </div>
           </div>

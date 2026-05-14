@@ -72,6 +72,10 @@ public sealed class TrayContext : ApplicationContext
         {
             try { _service.StartOsc(); } catch { /* surfaced via bridge log */ }
         }
+        if (_settings.EnablePfSignalHook)
+        {
+            try { _service.PfSignal.Start(); } catch { /* surfaced via bridge log */ }
+        }
 
         if (!_settings.StartMinimised)
             ShowForm();
