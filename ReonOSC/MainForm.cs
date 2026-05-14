@@ -411,6 +411,7 @@ public sealed class MainForm : Form
     public async Task ConnectAsync()
     {
         _connectButton.Enabled = false;
+        bool connected = false;
         try
         {
             ulong? addr = null;
@@ -438,11 +439,16 @@ public sealed class MainForm : Form
             await _service.Reon.ConnectAsync(addr.Value, stored.TokenBytes);
             _statusLabel.Text = $"Status: connected to {ReonClient.FormatMac(addr.Value)}";
             _disconnectButton.Enabled = true;
+            connected = true;
         }
         catch (Exception ex)
         {
             AppendLog($"Connect failed: {ex.Message}");
-            _connectButton.Enabled = true;
+        }
+        finally
+        {
+            // Only keep Connect disabled while a connection is actually live.
+            if (!connected) _connectButton.Enabled = true;
         }
     }
 
@@ -484,6 +490,8 @@ public sealed class MainForm : Form
             _settings.LastKnownMac = ReonClient.FormatMac(addr.Value);
             PersistSettings();
             AppendLog("Paired. You can now Connect.");
+            // Make sure Connect is usable even if a prior auto-connect attempt left it disabled.
+            _connectButton.Enabled = !_service.Reon.IsConnected;
         }
         catch (Exception ex)
         {
