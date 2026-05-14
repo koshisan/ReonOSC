@@ -81,15 +81,33 @@ public sealed class ControlService : IAsyncDisposable
     public string? FirstOscAddress { get; private set; }
     public string? FirstOscArg { get; private set; }
 
+    /// <summary>Per-address rolling stats so the user can inspect which OSC
+    /// addresses their sender actually emits without flooding the log.
+    /// Capped to avoid pathological growth on senders that include random
+    /// IDs in every path.</summary>
+    public readonly record struct OscAddressStats(long Count, string? LastArg, DateTime LastSeenUtc);
+    private const int MaxTrackedAddresses = 1024;
+    private readonly Dictionary<string, OscAddressStats> _addrStats = new(StringComparer.Ordinal);
+    public IReadOnlyDictionary<string, OscAddressStats> DiscoveredAddresses => _addrStats;
+
     private void OnOscMessage(object? sender, OscMessage msg)
     {
         OscPacketsReceived++;
+
+        // Update per-address stats for the inspector. Bounded so a chatty
+        // sender that puts random IDs in every path can't blow up memory.
+        var argStr = msg.Arguments.Count == 0 ? null
+                   : msg.Arguments[0] is null ? null
+                   : msg.Arguments[0]!.ToString();
+        if (_addrStats.TryGetValue(msg.Address, out var prev))
+            _addrStats[msg.Address] = new OscAddressStats(prev.Count + 1, argStr, DateTime.UtcNow);
+        else if (_addrStats.Count < MaxTrackedAddresses)
+            _addrStats[msg.Address] = new OscAddressStats(1, argStr, DateTime.UtcNow);
+
         if (!_firstOscLogged)
         {
             _firstOscLogged = true;
-            var argHint = msg.Arguments.Count == 0 ? "(no args)"
-                        : msg.Arguments[0] is null ? "null"
-                        : msg.Arguments[0]!.ToString() ?? "?";
+            var argHint = argStr ?? "(no args)";
             FirstOscAddress = msg.Address;
             FirstOscArg = argHint;
             Log?.Invoke(this, $"OSC first packet: {msg.Address} = {argHint}");
@@ -117,16 +135,34 @@ public sealed class ControlService : IAsyncDisposable
         // surfaces matched values directly.
     }
 
-    /// <summary>Compare with permissive matching: tolerate missing or extra leading slash.</summary>
+    /// <summary>
+    /// Compare with permissive matching. Three accepted shapes:
+    ///   1. Direct equality (modulo a leading-slash difference).
+    ///   2. The incoming address has the standard VRChat avatar prefix
+    ///      '/avatar/parameters/' tacked onto the configured one — i.e. the
+    ///      user types '/PFHotHigh' in the GUI and VRChat actually sends
+    ///      '/avatar/parameters/PFHotHigh'. We strip the prefix and re-match.
+    ///      The prefix is intentionally invisible in the GUI to keep the
+    ///      field labels short.
+    /// </summary>
+    private const string VrcAvatarPrefix = "avatar/parameters/";
+
     private static bool MatchAddress(string incoming, string configured)
     {
         if (string.Equals(incoming, configured, StringComparison.Ordinal)) return true;
-        if (incoming.StartsWith('/') ^ configured.StartsWith('/'))
+
+        var a = incoming.TrimStart('/');
+        var b = configured.TrimStart('/');
+        if (string.Equals(a, b, StringComparison.Ordinal)) return true;
+
+        // Implicit VRChat avatar-param prefix: the configured path is treated
+        // as "name within /avatar/parameters/".
+        if (a.StartsWith(VrcAvatarPrefix, StringComparison.Ordinal))
         {
-            var a = incoming.TrimStart('/');
-            var b = configured.TrimStart('/');
-            return string.Equals(a, b, StringComparison.Ordinal);
+            var tail = a.Substring(VrcAvatarPrefix.Length);
+            if (string.Equals(tail, b, StringComparison.Ordinal)) return true;
         }
+
         return false;
     }
 
