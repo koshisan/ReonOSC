@@ -228,7 +228,7 @@ function App() {
   const [startMin, setStartMin] = useState(false);
   const [autoConn, setAutoConn] = useState(true);
   const [pfHook, setPfHook] = useState(false);
-  const [pfState, setPfState] = useState({ running: false, hex: "—", decoded: "Off", mode: "Off", level: 0 });
+  const [pfState, setPfState] = useState({ running: false, hex: "—", decoded: "Off", mode: "Off", level: 0, backend: "None" });
 
   // Incoming OSC inputs
   const [oscIn, setOscIn] = useState({ PFHotHigh: 0, water: 0, cold: 0.0, heat: 0.0 });
@@ -361,6 +361,7 @@ function App() {
           decoded: p.decoded ?? "Off",
           mode: p.mode ?? "Off",
           level: p.level ?? 0,
+          backend: p.backend ?? "None",
         });
       }),
     ];
@@ -703,6 +704,15 @@ function App() {
                           }}
                         >
                           → {pfState.decoded}
+                        </span>
+                        <span
+                          className="tag mono"
+                          style={{color: "var(--text-muted)", fontSize: 10}}
+                          title="Active capture backend"
+                        >
+                          {pfState.backend === "OpenVrMirror" ? "VR" :
+                           pfState.backend === "DesktopDuplication" ? "Desktop" :
+                           pfState.backend}
                         </span>
                         <button
                           className="btn ghost"

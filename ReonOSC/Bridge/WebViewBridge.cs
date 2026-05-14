@@ -57,6 +57,7 @@ public sealed class WebViewBridge : IDisposable
                 hex = _lastPfHex,
                 r = sample.R, g = sample.G, b = sample.B,
                 running = _service.PfSignal.IsRunning,
+                backend = _service.PfSignal.ActiveBackend.ToString(),
                 mode = thermal.Mode.ToString(),  // "Off" / "Cool" / "Hot"
                 level = thermal.Level,
                 decoded = thermal.ToString(),    // "Cool L2" etc.
