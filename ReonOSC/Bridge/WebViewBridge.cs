@@ -105,6 +105,7 @@ public sealed class WebViewBridge : IDisposable
             case "pair":           _ = PairAsync(); break;
             case "osc.start":      OscStart(payload); break;
             case "osc.stop":       _service.StopOsc(); PushOscState(); break;
+            case "osc.setPort":    SetOscPort(payload); break;
             case "osc.setAddress": SetAddress(payload); break;
             case "manual.toggle":  _ = ToggleManual(payload); break;
             case "manual.set":     _ = SetManual(payload); break;
@@ -273,6 +274,21 @@ public sealed class WebViewBridge : IDisposable
         {
             Push("log.line", new { t = Ts(), kind = "err", msg = $"OSC start failed: {ex.Message}" });
         }
+        PushOscState();
+    }
+
+    private void SetOscPort(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return;
+        if (!payload.TryGetProperty("port", out var portEl) || !portEl.TryGetInt32(out var port)) return;
+        if (port < 1 || port > 65535) return;
+        if (_settings.OscPort == port) return;
+
+        _settings.OscPort = port;
+        _settings.Save();
+        // Don't auto-restart a stopped server here; if it's running, ApplySettings
+        // will hot-swap the listener to the new port.
+        _service.ApplySettings(_settings);
         PushOscState();
     }
 

@@ -11,7 +11,7 @@ namespace ReonOSC.Models;
 /// </summary>
 public sealed class Settings
 {
-    public int OscPort { get; set; } = 9001;
+    public int OscPort { get; set; } = 9302;
 
     /// <summary>Wire level (0..3) to apply when PFHotHigh OSC bool turns true.</summary>
     public int HeatTouchLevel { get; set; } = 3;

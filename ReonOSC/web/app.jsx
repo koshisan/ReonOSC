@@ -169,7 +169,7 @@ function App() {
   const [uptime, setUptime] = useState(0);
 
   // OSC server
-  const [oscPort, setOscPort] = useState(9001);
+  const [oscPort, setOscPort] = useState(9302);
   const [oscRunning, setOscRunning] = useState(false);
   const [addresses, setAddresses] = useState({
     PFHotHigh: "/PFHotHigh",
@@ -413,7 +413,10 @@ function App() {
 
   const onPortChange = (v) => {
     setOscPort(v);
-    if (hosted && oscRunning) send("osc.start", { port: v });
+    // Persist on every change. Backend hot-swaps the listener if running,
+    // and just saves to disk if stopped — so the port survives restart
+    // even when the user changes it without ever pressing Start.
+    if (hosted) send("osc.setPort", { port: v });
   };
 
   const onAddressChange = (key, value) => {
