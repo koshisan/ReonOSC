@@ -157,10 +157,12 @@ public sealed class PfSignalReader : IDisposable
             int sy = Math.Clamp((int)(desc.Height * SamplePointY) - SampleRegion / 2, 0, (int)desc.Height - SampleRegion);
 
             EnsureStaging(desc.Format);
+            // Fully-qualified Box: Vortice.Direct3D11.Box collides with
+            // other Box-named types in scope (e.g. WinForms / System.Drawing).
             _context.CopySubresourceRegion(
                 _staging!, 0, 0, 0, 0,
                 src, 0,
-                new Box(sx, sy, 0, sx + SampleRegion, sy + SampleRegion, 1));
+                new Vortice.Direct3D11.Box(sx, sy, 0, sx + SampleRegion, sy + SampleRegion, 1));
 
             var map = _context.Map(_staging!, 0, MapMode.Read);
             try

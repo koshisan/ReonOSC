@@ -13,6 +13,8 @@
     <Version>0.1.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\assets\reon.ico</ApplicationIcon>
+    <!-- PfSignalReader uses an unsafe block to walk the mapped staging texture. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
