@@ -357,6 +357,12 @@ function App() {
       }),
     ];
 
+    // All listeners are wired now — tell the host we're ready to receive
+    // initial state. Sending earlier (from reon-bridge.js's IIFE) would race
+    // against this useEffect and the first round of pushes would arrive
+    // before the on(...) handlers exist.
+    reonBridge.send("ui.ready", null);
+
     return () => unsubs.forEach((u) => u());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hosted]);

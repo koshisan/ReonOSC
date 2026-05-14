@@ -118,13 +118,12 @@ public sealed class MainForm : Form
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsZoomControlEnabled = false;
 
-            // Wire the bridge AFTER the page is loaded so PostWebMessageAsJson
-            // arrives at a listener that exists.
-            core.NavigationCompleted += (_, e) =>
-            {
-                if (!e.IsSuccess) return;
-                _bridge ??= new WebViewBridge(_web, _service, _settings);
-            };
+            // Construct the bridge BEFORE Navigate so its WebMessageReceived
+            // subscription is in place when the loaded JS posts 'ui.ready'.
+            // Doing it from NavigationCompleted loses that first message and
+            // OnUiReady never runs — which means the OSC retry/log path
+            // doesn't run either.
+            _bridge ??= new WebViewBridge(_web, _service, _settings);
 
             core.Navigate("https://reonosc.local/index.html");
         }

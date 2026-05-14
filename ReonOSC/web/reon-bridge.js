@@ -66,8 +66,8 @@
     },
   };
 
-  // Signal we're ready to receive initial state.
-  if (hosted) {
-    window.reonBridge.send("ui.ready", null);
-  }
+  // NOTE: 'ui.ready' is NOT sent from here any more — it's sent from app.jsx
+  // after React has mounted and the on(...) listeners are in place. Sending
+  // it from this IIFE would race against React's first useEffect and lose
+  // the host's initial state push events.
 })();
