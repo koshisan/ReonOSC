@@ -183,6 +183,10 @@ function App() {
   useEffect(() => { localStorage.setItem("reon.spark", showSparkline ? "1" : "0"); }, [showSparkline]);
   useEffect(() => { localStorage.setItem("reon.compactlog", compactLog ? "1" : "0"); }, [compactLog]);
 
+  // Configuration section collapsed by default; persist the user's choice.
+  const [configOpen, setConfigOpen] = useState(() => localStorage.getItem("reon.configOpen") === "1");
+  useEffect(() => { localStorage.setItem("reon.configOpen", configOpen ? "1" : "0"); }, [configOpen]);
+
   const hosted = !!(window.reonBridge && window.reonBridge.isHosted);
   const send = useCallback((cmd, payload) => {
     if (hosted) reonBridge.send(cmd, payload);
@@ -524,52 +528,6 @@ function App() {
             </div>
           </div>
 
-          {/* OSC server */}
-          <div className="card">
-            <div className="card-header">
-              <div className="card-title"><span className="dot"/>OSC server</div>
-              <span className={`pill ${oscRunning ? "connected" : "disconnected"}`}>
-                <span className={`pulse ${oscRunning ? "" : "off"}`} style={oscRunning ? {background: "var(--accent)", boxShadow: `0 0 0 0 ${accent}80`} : null}/>
-                {oscRunning ? `Listening on UDP ${oscPort}` : "Stopped"}
-              </span>
-            </div>
-            <div className="card-body">
-              <div className="row" style={{gap: 14}}>
-                <span className="field-label" style={{width: 70}}>UDP port</span>
-                <NumInput
-                  value={oscPort}
-                  onChange={onPortChange}
-                  min={1024}
-                  max={65535}
-                  step={1}
-                  width={96}
-                  disabled={oscRunning}
-                />
-                <button className={`btn ${oscRunning ? "danger" : "primary"}`} onClick={toggleOsc}>
-                  {oscRunning ? <><Icon name="stop"/> Stop</> : <><Icon name="play"/> Start</>}
-                </button>
-              </div>
-
-              <div style={{height: 1, background: "var(--border)", margin: "4px 0 2px"}}/>
-
-              <div className="card-title" style={{padding: "4px 0", textTransform: "none", letterSpacing: 0, fontSize: 11.5, color: "var(--text-dim)", fontWeight: 500}}>
-                OSC addresses <span style={{color: "var(--text-muted)", fontWeight: 400}}>— edit to match your sender</span>
-              </div>
-
-              {[
-                { key: "PFHotHigh", label: "PFHotHigh", type: "bool" },
-                { key: "water",     label: "water",     type: "bool" },
-                { key: "cold",      label: "cold",      type: "float" },
-                { key: "heat",      label: "heat",      type: "float" },
-              ].map((row) => (
-                <div className="osc-row" key={row.key}>
-                  <span className="osc-label">{row.label} <span className={`tag ${row.type}`}>{row.type}</span></span>
-                  <input className="input mono" value={addresses[row.key]} onChange={(e) => onAddressChange(row.key, e.target.value)}/>
-                </div>
-              ))}
-            </div>
-          </div>
-
           {/* Manual control */}
           <div className="card">
             <div className="card-header">
@@ -600,69 +558,117 @@ function App() {
             </div>
           </div>
 
-          {/* Preset levels */}
+          {/* Configuration — collapsible: OSC, addresses, preset levels, options */}
           <div className="card">
-            <div className="card-header">
-              <div className="card-title"><span className="dot"/>Preset levels for OSC triggers</div>
-            </div>
-            <div className="card-body">
-              <div className="row between">
-                <span className="osc-label">
-                  Heat Touch <span className="tag" style={{color: "var(--heat-2)"}}>when PFHotHigh = 1</span>
+            <div className="card-header card-toggle" onClick={() => setConfigOpen((v) => !v)}>
+              <div className="card-title"><span className="dot"/>Configuration</div>
+              <div style={{display: "flex", alignItems: "center", gap: 10}}>
+                <span className={`pill ${oscRunning ? "connected" : "disconnected"}`}>
+                  <span className={`pulse ${oscRunning ? "" : "off"}`} style={oscRunning ? {background: "var(--accent)", boxShadow: `0 0 0 0 ${accent}80`} : null}/>
+                  {oscRunning ? `OSC ${oscPort}` : "OSC off"}
                 </span>
-                <LevelBars value={heatLevel} onChange={onHeatLevelChange} color="#ff7a3d" max={caps.heatMax}/>
-              </div>
-              <div className="row between">
-                <span className="osc-label">
-                  Cold Water <span className="tag" style={{color: "var(--cool)"}}>when water = 1</span>
-                </span>
-                <LevelBars value={coldLevel} onChange={onColdLevelChange} color="#4ab8ff" max={caps.coolMax}/>
+                <Icon name={configOpen ? "chevU" : "chevD"} size={14}/>
               </div>
             </div>
-          </div>
+            {configOpen && (
+              <div className="card-body">
+                {/* OSC server */}
+                <div className="config-section-title">OSC server</div>
+                <div className="row" style={{gap: 14}}>
+                  <span className="field-label" style={{width: 70}}>UDP port</span>
+                  <NumInput
+                    value={oscPort}
+                    onChange={onPortChange}
+                    min={1024}
+                    max={65535}
+                    step={1}
+                    width={96}
+                    disabled={oscRunning}
+                  />
+                  <button className={`btn ${oscRunning ? "danger" : "primary"}`} onClick={toggleOsc}>
+                    {oscRunning ? <><Icon name="stop"/> Stop</> : <><Icon name="play"/> Start</>}
+                  </button>
+                </div>
 
-          {/* Options */}
-          <div className="card">
-            <div className="card-header">
-              <div className="card-title"><span className="dot"/>Options</div>
-              <div className="actions">
-                <button
-                  className="btn ghost"
-                  onClick={cycleTheme}
-                  title={`Theme: ${themePref === "system" ? "follow OS" : themePref} — click to cycle`}
-                >
-                  <Icon name={effectiveTheme === "dark" ? "sun" : "moon"} size={12}/>
-                  <span style={{marginLeft: 6}}>
-                    {themePref === "system" ? "Auto" : themePref === "dark" ? "Dark" : "Light"}
+                <div className="config-divider"/>
+
+                <div className="config-section-title small">
+                  OSC addresses <span style={{color: "var(--text-muted)", fontWeight: 400, textTransform: "none", letterSpacing: 0}}>— edit to match your sender</span>
+                </div>
+
+                {[
+                  { key: "PFHotHigh", label: "PFHotHigh", type: "bool" },
+                  { key: "water",     label: "water",     type: "bool" },
+                  { key: "cold",      label: "cold",      type: "float" },
+                  { key: "heat",      label: "heat",      type: "float" },
+                ].map((row) => (
+                  <div className="osc-row" key={row.key}>
+                    <span className="osc-label">{row.label} <span className={`tag ${row.type}`}>{row.type}</span></span>
+                    <input className="input mono" value={addresses[row.key]} onChange={(e) => onAddressChange(row.key, e.target.value)}/>
+                  </div>
+                ))}
+
+                <div className="config-divider"/>
+
+                {/* Preset levels */}
+                <div className="config-section-title">Preset levels for OSC triggers</div>
+                <div className="row between">
+                  <span className="osc-label">
+                    Heat Touch <span className="tag" style={{color: "var(--heat-2)"}}>when PFHotHigh = 1</span>
                   </span>
-                </button>
-                <button className="btn ghost" onClick={() => setShowSparkline((v) => !v)} title="Toggle sparkline">
-                  {showSparkline ? "Hide sparkline" : "Show sparkline"}
-                </button>
+                  <LevelBars value={heatLevel} onChange={onHeatLevelChange} color="#ff7a3d" max={caps.heatMax}/>
+                </div>
+                <div className="row between">
+                  <span className="osc-label">
+                    Cold Water <span className="tag" style={{color: "var(--cool)"}}>when water = 1</span>
+                  </span>
+                  <LevelBars value={coldLevel} onChange={onColdLevelChange} color="#4ab8ff" max={caps.coolMax}/>
+                </div>
+
+                <div className="config-divider"/>
+
+                {/* Options */}
+                <div className="config-section-title">
+                  Options
+                  <span style={{flex: 1}}/>
+                  <button
+                    className="btn ghost"
+                    onClick={(e) => { e.stopPropagation(); cycleTheme(); }}
+                    title={`Theme: ${themePref === "system" ? "follow OS" : themePref} — click to cycle`}
+                  >
+                    <Icon name={effectiveTheme === "dark" ? "sun" : "moon"} size={12}/>
+                    <span style={{marginLeft: 6}}>
+                      {themePref === "system" ? "Auto" : themePref === "dark" ? "Dark" : "Light"}
+                    </span>
+                  </button>
+                  <button className="btn ghost" onClick={(e) => { e.stopPropagation(); setShowSparkline((v) => !v); }} title="Toggle sparkline">
+                    {showSparkline ? "Hide sparkline" : "Show sparkline"}
+                  </button>
+                </div>
+                <div style={{display: "flex", flexDirection: "row", gap: 24, flexWrap: "wrap"}}>
+                  <label className="check">
+                    <input type="checkbox" checked={startMin} onChange={(e) => onStartMinChange(e.target.checked)}/>
+                    <span className="check-box"/>
+                    Start minimised to tray
+                  </label>
+                  <label className="check">
+                    <input type="checkbox" checked={autoConn} onChange={(e) => onAutoConnChange(e.target.checked)}/>
+                    <span className="check-box"/>
+                    Auto-connect to Reon on start
+                  </label>
+                  <label className="check" title="Reads the Pebble Feel signal pixel from the SteamVR compositor mirror texture. Experimental.">
+                    <input type="checkbox" checked={pfHook} onChange={(e) => onPfHookChange(e.target.checked)}/>
+                    <span className="check-box"/>
+                    Pebble Feel signal hook
+                    {pfHook && (
+                      <span className="tag mono" style={{marginLeft: 8, color: "var(--text-dim)"}}>
+                        {pfState.running ? pfState.hex : "—"}
+                      </span>
+                    )}
+                  </label>
+                </div>
               </div>
-            </div>
-            <div className="card-body" style={{flexDirection: "row", gap: 24, flexWrap: "wrap"}}>
-              <label className="check">
-                <input type="checkbox" checked={startMin} onChange={(e) => onStartMinChange(e.target.checked)}/>
-                <span className="check-box"/>
-                Start minimised to tray
-              </label>
-              <label className="check">
-                <input type="checkbox" checked={autoConn} onChange={(e) => onAutoConnChange(e.target.checked)}/>
-                <span className="check-box"/>
-                Auto-connect to Reon on start
-              </label>
-              <label className="check" title="Reads the Pebble Feel signal pixel from the SteamVR compositor mirror texture. Experimental.">
-                <input type="checkbox" checked={pfHook} onChange={(e) => onPfHookChange(e.target.checked)}/>
-                <span className="check-box"/>
-                Pebble Feel signal hook
-                {pfHook && (
-                  <span className="tag mono" style={{marginLeft: 8, color: "var(--text-dim)"}}>
-                    {pfState.running ? pfState.hex : "—"}
-                  </span>
-                )}
-              </label>
-            </div>
+            )}
           </div>
         </section>
 

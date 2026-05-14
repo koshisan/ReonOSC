@@ -31,15 +31,35 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         AutoScaleMode = AutoScaleMode.Dpi;
-        MinimumSize = new Size(960, 640);
+        MinimumSize = new Size(900, 600);
+
+        // Restore last-known size if reasonable, else pick a sensible default
+        // that fits comfortably in the working area.
         var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
-        ClientSize = new Size(
-            Math.Min(1280, workArea.Width - 80),
-            Math.Min(800,  workArea.Height - 80));
+        int defaultW = Math.Min(1180, workArea.Width  - 80);
+        int defaultH = Math.Min(760,  workArea.Height - 80);
+        int w = _settings.WindowWidth  >= MinimumSize.Width  && _settings.WindowWidth  <= workArea.Width
+              ? _settings.WindowWidth  : defaultW;
+        int h = _settings.WindowHeight >= MinimumSize.Height && _settings.WindowHeight <= workArea.Height
+              ? _settings.WindowHeight : defaultH;
+        ClientSize = new Size(w, h);
+
         BackColor = Color.FromArgb(26, 31, 41); // matches the dark-theme --bg
 
         Controls.Add(_web);
         _ = InitWebViewAsync();
+
+        // Persist the size when the user finishes resizing the window.
+        ResizeEnd += (_, _) => SaveWindowSize();
+    }
+
+    private void SaveWindowSize()
+    {
+        if (WindowState != FormWindowState.Normal) return;
+        if (_settings.WindowWidth == ClientSize.Width && _settings.WindowHeight == ClientSize.Height) return;
+        _settings.WindowWidth = ClientSize.Width;
+        _settings.WindowHeight = ClientSize.Height;
+        try { _settings.Save(); } catch { /* ignore */ }
     }
 
     private async Task InitWebViewAsync()
