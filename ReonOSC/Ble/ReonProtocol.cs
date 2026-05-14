@@ -6,7 +6,13 @@ namespace ReonOSC.Ble;
 /// </summary>
 public static class ReonProtocol
 {
-    public const string DeviceName = "RNP-3";
+    /// <summary>
+    /// Advertised name prefix used during discovery. Today's wearable Reon
+    /// ships as "RNP-3"; future generations are expected to keep the "RNP-"
+    /// prefix. Note that the wire protocol below is only verified on RNP-3.
+    /// </summary>
+    public const string DeviceName = "RNP-3";  // legacy alias; prefer DeviceNamePrefix
+    public const string DeviceNamePrefix = "RNP-";
 
     // UUID group 3 is `404e`, NOT `4057` — easy to misread.
     public static readonly Guid ServiceUuid = new("04ca1501-fd57-404e-8459-c5ef8d765c8d");

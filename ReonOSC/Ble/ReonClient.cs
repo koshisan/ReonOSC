@@ -61,7 +61,8 @@ public sealed class ReonClient : IAsyncDisposable
 
         watcher.Received += (s, args) =>
         {
-            if (args.Advertisement?.LocalName == ReonProtocol.DeviceName)
+            var name = args.Advertisement?.LocalName;
+            if (!string.IsNullOrEmpty(name) && name.StartsWith(ReonProtocol.DeviceNamePrefix, StringComparison.Ordinal))
                 Stop(args.BluetoothAddress);
         };
 
