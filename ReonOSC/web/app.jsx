@@ -432,9 +432,11 @@ function App() {
 
   /* ----- render ----- */
   return (
-    <div className="app">
-      {/* Native window chrome is used; the in-app chrome strip is hidden. */}
-      <main className="main" style={{gridTemplateRows: "1fr auto"}}>
+    /* The CSS sets grid-template-rows: 38px 1fr to make room for a custom
+       title bar we don't render. Collapse that first row so <main> gets the
+       full height. */
+    <div className="app" style={{gridTemplateRows: "1fr"}}>
+      <main className="main">
         {/* Controls panel */}
         <section className="controls-panel">
           {/* Reon connection */}
