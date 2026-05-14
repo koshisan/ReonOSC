@@ -66,10 +66,28 @@ public sealed class ControlService : IAsyncDisposable
 
     public float GetInput(InputSource src) => _inputs.Get(src);
 
+    /// <summary>Cumulative count of OSC packets we've received this session
+    /// regardless of whether the address matched anything. Useful as a
+    /// liveness signal without spamming the log on chatty senders.</summary>
+    public long OscPacketsReceived { get; private set; }
+
+    /// <summary>Set to true after the first OSC packet of the session arrives,
+    /// so we emit exactly one log line confirming the pipe is live.</summary>
+    private bool _firstOscLogged;
+
     private void OnOscMessage(object? sender, OscMessage msg)
     {
-        var addr = msg.Address;
+        OscPacketsReceived++;
+        if (!_firstOscLogged)
+        {
+            _firstOscLogged = true;
+            var argHint = msg.Arguments.Count == 0 ? "(no args)"
+                        : msg.Arguments[0] is null ? "null"
+                        : msg.Arguments[0]!.ToString() ?? "?";
+            Log?.Invoke(this, $"OSC first packet: {msg.Address} = {argHint}");
+        }
 
+        var addr = msg.Address;
         if (MatchAddress(addr, Settings.AddrPfHotHigh))
         {
             if (msg.TryGetBool(0, out var b)) UpdateInput(InputSource.PfHotHigh, b ? 1f : 0f);
@@ -86,6 +104,9 @@ public sealed class ControlService : IAsyncDisposable
         {
             if (msg.TryGetFloat(0, out var f)) UpdateInput(InputSource.Heat, Math.Clamp(f, 0f, 1f));
         }
+        // Unmatched addresses are intentionally silent — the packet counter
+        // above proves the pipe works, and the OSC inputs panel in the GUI
+        // surfaces matched values directly.
     }
 
     /// <summary>Compare with permissive matching: tolerate missing or extra leading slash.</summary>
