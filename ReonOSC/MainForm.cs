@@ -55,8 +55,9 @@ public sealed class MainForm : Form
         Text = "ReonOSC";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(560, 720);
-        ClientSize = new Size(560, 760);
+        AutoScaleMode = AutoScaleMode.Font;
+        MinimumSize = new Size(620, 600);
+        ClientSize = new Size(720, 880);
 
         BuildLayout();
         BindControls();
@@ -71,17 +72,23 @@ public sealed class MainForm : Form
 
     private void BuildLayout()
     {
-        var root = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            AutoScroll = true,
+            Padding = new Padding(8),
+            GrowStyle = TableLayoutPanelGrowStyle.AddRows,
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         Controls.Add(root);
 
-        int y = 8;
         void Add(GroupBox g)
         {
-            g.Location = new Point(8, y);
-            g.Width = ClientSize.Width - 32; // leave space for vertical scrollbar
-            g.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            if (g.Dock == DockStyle.None) g.Dock = DockStyle.Top;
+            g.Margin = new Padding(0, 0, 0, 8);
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.Controls.Add(g);
-            y += g.Height + 8;
         }
 
         Add(BuildConnectionGroup());
@@ -91,180 +98,253 @@ public sealed class MainForm : Form
         Add(BuildStatusGroup());
         Add(BuildOptionsGroup());
         Add(BuildLogGroup());
+
+        // Log gets the rest of the column at 100% so it stretches if the form grows.
+        root.RowStyles[root.RowStyles.Count - 1] = new RowStyle(SizeType.Percent, 100f);
     }
+
+    private static GroupBox MakeGroup(string title) => new()
+    {
+        Text = title,
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Padding = new Padding(10, 6, 10, 10),
+    };
+
+    private static TableLayoutPanel MakeInnerTlp(int columns) => new()
+    {
+        Dock = DockStyle.Top,
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        ColumnCount = columns,
+    };
+
+    private static Label MakeLabel(string text, Padding? margin = null) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Margin = margin ?? new Padding(0, 6, 8, 4),
+    };
 
     private GroupBox BuildConnectionGroup()
     {
-        var g = new GroupBox { Text = "Reon connection", Dock = DockStyle.Top, Height = 90 };
+        var g = MakeGroup("Reon connection");
+        var t = MakeInnerTlp(3);
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
         _statusLabel.Text = "Status: disconnected";
         _statusLabel.AutoSize = true;
-        _statusLabel.Location = new Point(12, 24);
+        _statusLabel.Margin = new Padding(0, 4, 0, 8);
+        t.Controls.Add(_statusLabel, 0, 0);
+        t.SetColumnSpan(_statusLabel, 3);
 
-        _connectButton.Text = "Connect";
-        _connectButton.Location = new Point(12, 48);
-        _connectButton.Size = new Size(120, 28);
-
-        _disconnectButton.Text = "Disconnect";
-        _disconnectButton.Location = new Point(140, 48);
-        _disconnectButton.Size = new Size(120, 28);
+        SetupButton(_connectButton, "Connect");
+        SetupButton(_disconnectButton, "Disconnect");
         _disconnectButton.Enabled = false;
+        SetupButton(_pairButton, "Pair (device in pair mode)…");
+        t.Controls.Add(_connectButton, 0, 1);
+        t.Controls.Add(_disconnectButton, 1, 1);
+        t.Controls.Add(_pairButton, 2, 1);
 
-        _pairButton.Text = "Pair (device in pair mode)…";
-        _pairButton.Location = new Point(270, 48);
-        _pairButton.Size = new Size(200, 28);
-
-        g.Controls.AddRange(new Control[] { _statusLabel, _connectButton, _disconnectButton, _pairButton });
+        g.Controls.Add(t);
         return g;
+    }
+
+    private static void SetupButton(Button b, string text)
+    {
+        b.Text = text;
+        b.AutoSize = true;
+        b.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        b.Padding = new Padding(10, 4, 10, 4);
+        b.Margin = new Padding(0, 0, 8, 0);
     }
 
     private GroupBox BuildOscGroup()
     {
-        var g = new GroupBox { Text = "OSC server", Dock = DockStyle.Top, Height = 180 };
+        var g = MakeGroup("OSC server");
+        var t = MakeInnerTlp(2);
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        var portLabel = new Label { Text = "UDP port:", AutoSize = true, Location = new Point(12, 28) };
-        _portInput.Location = new Point(80, 24);
-        _portInput.Size = new Size(80, 24);
+        // top row: UDP port input + Start/Stop button + status — packed into a FlowLayoutPanel
+        var portRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0, 0, 0, 8),
+        };
+        portRow.Controls.Add(MakeLabel("UDP port:"));
         _portInput.Minimum = 1;
         _portInput.Maximum = 65535;
         _portInput.Value = _settings.OscPort;
-
-        _oscToggleButton.Text = "Start";
-        _oscToggleButton.Location = new Point(170, 22);
-        _oscToggleButton.Size = new Size(80, 28);
-
+        _portInput.Width = 90;
+        _portInput.Margin = new Padding(0, 3, 12, 0);
+        portRow.Controls.Add(_portInput);
+        SetupButton(_oscToggleButton, "Start");
+        _oscToggleButton.Margin = new Padding(0, 0, 12, 0);
+        portRow.Controls.Add(_oscToggleButton);
         _oscStatusLabel.AutoSize = true;
-        _oscStatusLabel.Location = new Point(260, 28);
         _oscStatusLabel.Text = "(stopped)";
+        _oscStatusLabel.Margin = new Padding(0, 6, 0, 0);
+        portRow.Controls.Add(_oscStatusLabel);
+        t.Controls.Add(portRow, 0, 0);
+        t.SetColumnSpan(portRow, 2);
 
-        var addrLabel = new Label
-        {
-            Text = "OSC addresses (edit to match your sender):",
-            AutoSize = true,
-            Location = new Point(12, 56),
-        };
+        var hint = MakeLabel("OSC addresses (edit to match your sender):", new Padding(0, 4, 0, 4));
+        t.Controls.Add(hint, 0, 1);
+        t.SetColumnSpan(hint, 2);
 
-        SetupAddrRow(_addrPfHot, "PFHotHigh:", 12, 80, _settings.AddrPfHotHigh);
-        SetupAddrRow(_addrWater, "water (bool):", 12, 104, _settings.AddrWater);
-        SetupAddrRow(_addrCold,  "cold (float):", 12, 128, _settings.AddrCold);
-        SetupAddrRow(_addrHeat,  "heat (float):", 12, 152, _settings.AddrHeat);
+        int row = 2;
+        AddAddrRow(t, _addrPfHot, "PFHotHigh:",     _settings.AddrPfHotHigh, ref row);
+        AddAddrRow(t, _addrWater, "water (bool):",  _settings.AddrWater,     ref row);
+        AddAddrRow(t, _addrCold,  "cold (float):",  _settings.AddrCold,      ref row);
+        AddAddrRow(t, _addrHeat,  "heat (float):",  _settings.AddrHeat,      ref row);
 
-        g.Controls.AddRange(new Control[]
-        {
-            portLabel, _portInput, _oscToggleButton, _oscStatusLabel, addrLabel,
-            _addrPfHot.Tag as Label ?? new Label(), _addrPfHot,
-            _addrWater.Tag as Label ?? new Label(), _addrWater,
-            _addrCold.Tag as Label ?? new Label(), _addrCold,
-            _addrHeat.Tag as Label ?? new Label(), _addrHeat,
-        });
+        g.Controls.Add(t);
         return g;
     }
 
-    private void SetupAddrRow(TextBox tb, string label, int x, int y, string initial)
+    private static void AddAddrRow(TableLayoutPanel t, TextBox tb, string label, string initial, ref int row)
     {
-        var lbl = new Label { Text = label, Location = new Point(x, y + 4), Size = new Size(100, 20) };
-        tb.Location = new Point(x + 110, y);
-        tb.Size = new Size(380, 22);
+        t.Controls.Add(MakeLabel(label), 0, row);
         tb.Text = initial;
-        tb.Tag = lbl;
+        tb.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        tb.Margin = new Padding(0, 3, 0, 4);
+        t.Controls.Add(tb, 1, row);
+        row++;
     }
 
     private GroupBox BuildManualGroup()
     {
-        var g = new GroupBox { Text = "Manual control", Dock = DockStyle.Top, Height = 80 };
-        _manualOverride.Text = "Manual override (ignore OSC)";
-        _manualOverride.Location = new Point(12, 24);
-        _manualOverride.AutoSize = true;
+        var g = MakeGroup("Manual control");
+        var t = MakeInnerTlp(4);
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        var modeLabel = new Label { Text = "Mode:", Location = new Point(12, 50), AutoSize = true };
-        _manualMode.Location = new Point(60, 46);
-        _manualMode.Size = new Size(80, 24);
+        _manualOverride.Text = "Manual override (ignore OSC)";
+        _manualOverride.AutoSize = true;
+        _manualOverride.Margin = new Padding(0, 4, 0, 8);
+        t.Controls.Add(_manualOverride, 0, 0);
+        t.SetColumnSpan(_manualOverride, 4);
+
+        t.Controls.Add(MakeLabel("Mode:"), 0, 1);
         _manualMode.DropDownStyle = ComboBoxStyle.DropDownList;
         _manualMode.Items.AddRange(new object[] { "Stop", "Cool", "Heat" });
         _manualMode.SelectedIndex = 0;
+        _manualMode.Width = 110;
+        _manualMode.Margin = new Padding(0, 3, 20, 4);
+        t.Controls.Add(_manualMode, 1, 1);
 
-        var lvlLabel = new Label { Text = "Level:", Location = new Point(160, 50), AutoSize = true };
-        _manualLevel.Location = new Point(210, 46);
-        _manualLevel.Size = new Size(60, 24);
+        t.Controls.Add(MakeLabel("Level:"), 2, 1);
         _manualLevel.Minimum = ReonProtocol.LevelMin;
         _manualLevel.Maximum = ReonProtocol.LevelMax;
         _manualLevel.Value = 0;
+        _manualLevel.Width = 80;
+        _manualLevel.Margin = new Padding(0, 3, 0, 4);
+        t.Controls.Add(_manualLevel, 3, 1);
 
-        g.Controls.AddRange(new Control[]
-        {
-            _manualOverride, modeLabel, _manualMode, lvlLabel, _manualLevel
-        });
+        g.Controls.Add(t);
         return g;
     }
 
     private GroupBox BuildPresetsGroup()
     {
-        var g = new GroupBox { Text = "Preset levels for OSC triggers", Dock = DockStyle.Top, Height = 60 };
+        var g = MakeGroup("Preset levels for OSC triggers");
+        var t = MakeInnerTlp(2);
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        var lbl1 = new Label { Text = "Heat Touch (PFHotHigh=1):", Location = new Point(12, 28), AutoSize = true };
-        _heatTouchInput.Location = new Point(200, 24);
-        _heatTouchInput.Size = new Size(50, 24);
+        t.Controls.Add(MakeLabel("Heat Touch level (when PFHotHigh = 1):"), 0, 0);
         _heatTouchInput.Minimum = 0;
         _heatTouchInput.Maximum = ReonProtocol.LevelMax;
         _heatTouchInput.Value = _settings.HeatTouchLevel;
+        _heatTouchInput.Width = 80;
+        _heatTouchInput.Margin = new Padding(0, 3, 0, 4);
+        t.Controls.Add(_heatTouchInput, 1, 0);
 
-        var lbl2 = new Label { Text = "Cold Water (water=1):", Location = new Point(280, 28), AutoSize = true };
-        _coldWaterInput.Location = new Point(420, 24);
-        _coldWaterInput.Size = new Size(50, 24);
+        t.Controls.Add(MakeLabel("Cold Water level (when water = 1):"), 0, 1);
         _coldWaterInput.Minimum = 0;
         _coldWaterInput.Maximum = ReonProtocol.LevelMax;
         _coldWaterInput.Value = _settings.ColdWaterLevel;
+        _coldWaterInput.Width = 80;
+        _coldWaterInput.Margin = new Padding(0, 3, 0, 4);
+        t.Controls.Add(_coldWaterInput, 1, 1);
 
-        g.Controls.AddRange(new Control[] { lbl1, _heatTouchInput, lbl2, _coldWaterInput });
+        g.Controls.Add(t);
         return g;
     }
 
     private GroupBox BuildStatusGroup()
     {
-        var g = new GroupBox { Text = "Live status", Dock = DockStyle.Top, Height = 110 };
+        var g = MakeGroup("Live status");
+        var t = MakeInnerTlp(1);
+        t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+
         _resolvedLabel.Text = "Current: idle";
-        _resolvedLabel.Location = new Point(12, 24);
         _resolvedLabel.AutoSize = true;
         _resolvedLabel.Font = new Font(Font, FontStyle.Bold);
+        _resolvedLabel.Margin = new Padding(0, 0, 0, 6);
+        t.Controls.Add(_resolvedLabel, 0, 0);
 
         _telemLabel.Text = "Plate: —   Sink: —   Board: —   Ambient: —";
-        _telemLabel.Location = new Point(12, 48);
         _telemLabel.AutoSize = true;
+        _telemLabel.Margin = new Padding(0, 0, 0, 6);
+        t.Controls.Add(_telemLabel, 0, 1);
 
         _inputsLabel.Text = "OSC inputs: PFHotHigh=0  water=0  cold=0.00  heat=0.00";
-        _inputsLabel.Location = new Point(12, 72);
         _inputsLabel.AutoSize = true;
+        _inputsLabel.Margin = new Padding(0, 0, 0, 0);
+        t.Controls.Add(_inputsLabel, 0, 2);
 
-        g.Controls.AddRange(new Control[] { _resolvedLabel, _telemLabel, _inputsLabel });
+        g.Controls.Add(t);
         return g;
     }
 
     private GroupBox BuildOptionsGroup()
     {
-        var g = new GroupBox { Text = "Options", Dock = DockStyle.Top, Height = 80 };
+        var g = MakeGroup("Options");
+        var t = MakeInnerTlp(1);
+
         _startMinimisedBox.Text = "Start minimised to tray";
-        _startMinimisedBox.Location = new Point(12, 24);
         _startMinimisedBox.AutoSize = true;
         _startMinimisedBox.Checked = _settings.StartMinimised;
+        _startMinimisedBox.Margin = new Padding(0, 0, 0, 4);
+        t.Controls.Add(_startMinimisedBox, 0, 0);
 
         _autoConnectBox.Text = "Auto-connect to Reon on start";
-        _autoConnectBox.Location = new Point(12, 48);
         _autoConnectBox.AutoSize = true;
         _autoConnectBox.Checked = _settings.AutoConnectOnStart;
+        _autoConnectBox.Margin = new Padding(0, 0, 0, 0);
+        t.Controls.Add(_autoConnectBox, 0, 1);
 
-        g.Controls.AddRange(new Control[] { _startMinimisedBox, _autoConnectBox });
+        g.Controls.Add(t);
         return g;
     }
 
     private GroupBox BuildLogGroup()
     {
-        var g = new GroupBox { Text = "Log", Dock = DockStyle.Top, Height = 160 };
+        // Log keeps a fixed height so the TLP cell can give it a stable footprint.
+        var g = new GroupBox
+        {
+            Text = "Log",
+            AutoSize = false,
+            Dock = DockStyle.Fill,
+            Height = 200,
+            MinimumSize = new Size(0, 160),
+            Padding = new Padding(10, 6, 10, 10),
+        };
         _logBox.Multiline = true;
         _logBox.ScrollBars = ScrollBars.Vertical;
         _logBox.ReadOnly = true;
-        _logBox.Location = new Point(12, 22);
-        _logBox.Size = new Size(520, 130);
-        _logBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        _logBox.Font = new Font(FontFamily.GenericMonospace, 8.5f);
+        _logBox.Dock = DockStyle.Fill;
+        _logBox.Font = new Font(FontFamily.GenericMonospace, 9f);
         g.Controls.Add(_logBox);
         return g;
     }
