@@ -47,18 +47,16 @@ public sealed class WebViewBridge : IDisposable
             plate = t.SkinPlate, sink = t.Heatsink, board = t.Board, ambient = t.Ambient,
         });
         _service.InputsChanged += (_, snapshot) => PushInputs(snapshot);
-        _service.PfSignal.SignalChanged += (_, sample) =>
+        _service.PfSignal.SignalChanged += (_, sample) => Push("pf.signal", new
         {
-            Push("pf.signal", new
-            {
-                hex = sample.ToString(),
-                r = sample.R, g = sample.G, b = sample.B,
-                running = _service.PfSignal.IsRunning,
-            });
-            // SignalChanged only fires when the sampled colour actually changed,
-            // so this is naturally rate-limited and not spammy.
-            Push("log.line", new { t = Ts(), kind = "info", msg = $"PF signal: {sample}" });
-        };
+            hex = sample.ToString(),
+            r = sample.R, g = sample.G, b = sample.B,
+            running = _service.PfSignal.IsRunning,
+        });
+        // NB: no log line on signal change — in a real VR scene the sampled
+        // pixel updates on every render frame (head motion, animations, etc.),
+        // which would flood the log. The live swatch in the GUI is the
+        // observation surface.
 
         // Poll the OSC packet counter every 500 ms and push osc.state when it
         // changes, so the UI can show a live 'X packets' counter without per-
