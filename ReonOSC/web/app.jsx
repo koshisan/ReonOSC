@@ -107,15 +107,44 @@ function LevelBars({ value, onChange, color }) {
 
 /* ---------- App ---------- */
 function App() {
-  // Theme is the only "tweak" that stays in the shipping build.
-  const [theme, setTheme] = useState(() => localStorage.getItem("reon.theme") || "dark");
+  // Theme preference: "system" follows the OS via prefers-color-scheme; "dark"
+  // and "light" are explicit user overrides. The toggle cycles system→light→dark.
+  const [themePref, setThemePref] = useState(() => {
+    const s = localStorage.getItem("reon.theme");
+    return (s === "dark" || s === "light") ? s : "system";
+  });
+  const [osDark, setOsDark] = useState(() =>
+    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
   const [showSparkline, setShowSparkline] = useState(() => localStorage.getItem("reon.spark") !== "0");
   const [compactLog, setCompactLog] = useState(() => localStorage.getItem("reon.compactlog") === "1");
 
+  // Subscribe to OS theme changes — keeps "system" mode live.
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("reon.theme", theme);
-  }, [theme]);
+    if (!window.matchMedia) return;
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e) => setOsDark(e.matches);
+    mql.addEventListener ? mql.addEventListener("change", onChange) : mql.addListener(onChange);
+    return () => {
+      mql.removeEventListener ? mql.removeEventListener("change", onChange) : mql.removeListener(onChange);
+    };
+  }, []);
+
+  // Effective theme = user override, or OS preference if on "system".
+  const effectiveTheme = themePref === "system" ? (osDark ? "dark" : "light") : themePref;
+  useEffect(() => {
+    document.documentElement.dataset.theme = effectiveTheme;
+    document.documentElement.style.colorScheme = effectiveTheme;
+  }, [effectiveTheme]);
+
+  // Persist preference. "system" means "no override" → clear the key.
+  useEffect(() => {
+    if (themePref === "system") localStorage.removeItem("reon.theme");
+    else localStorage.setItem("reon.theme", themePref);
+  }, [themePref]);
+
+  const cycleTheme = () => setThemePref((p) =>
+    p === "system" ? "light" : p === "light" ? "dark" : "system");
+
   useEffect(() => { localStorage.setItem("reon.spark", showSparkline ? "1" : "0"); }, [showSparkline]);
   useEffect(() => { localStorage.setItem("reon.compactlog", compactLog ? "1" : "0"); }, [compactLog]);
 
@@ -525,8 +554,15 @@ function App() {
             <div className="card-header">
               <div className="card-title"><span className="dot"/>Options</div>
               <div className="actions">
-                <button className="btn ghost" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
-                  <Icon name={theme === "dark" ? "sun" : "moon"} size={12}/>
+                <button
+                  className="btn ghost"
+                  onClick={cycleTheme}
+                  title={`Theme: ${themePref === "system" ? "follow OS" : themePref} — click to cycle`}
+                >
+                  <Icon name={effectiveTheme === "dark" ? "sun" : "moon"} size={12}/>
+                  <span style={{marginLeft: 6}}>
+                    {themePref === "system" ? "Auto" : themePref === "dark" ? "Dark" : "Light"}
+                  </span>
                 </button>
                 <button className="btn ghost" onClick={() => setShowSparkline((v) => !v)} title="Toggle sparkline">
                   {showSparkline ? "Hide sparkline" : "Show sparkline"}
