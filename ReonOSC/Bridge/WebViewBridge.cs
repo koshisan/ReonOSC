@@ -139,6 +139,28 @@ public sealed class WebViewBridge : IDisposable
             enablePfSignalHook = _settings.EnablePfSignalHook,
         });
         Push("pf.signal", new { running = _service.PfSignal.IsRunning, hex = "—" });
+        // If TrayContext's silent auto-start didn't bring OSC up (port collision,
+        // permission, etc.), retry here so the user sees the failure in the log
+        // and can change the port from the UI. Either way, surface the final
+        // state via PushOscState below.
+        if (!_service.Osc.IsRunning)
+        {
+            try
+            {
+                _service.StartOsc();
+                Push("log.line", new { t = Ts(), kind = "info", msg = $"OSC listening on UDP {_service.Osc.Port}" });
+            }
+            catch (Exception ex)
+            {
+                Push("log.line", new { t = Ts(), kind = "err",
+                    msg = $"OSC auto-start failed on port {_settings.OscPort}: {ex.Message}" });
+            }
+        }
+        else
+        {
+            // Auto-start happened earlier (silently). Echo the state into the GUI log too.
+            Push("log.line", new { t = Ts(), kind = "info", msg = $"OSC listening on UDP {_service.Osc.Port}" });
+        }
         PushOscState();
         Push("conn.state", new
         {
