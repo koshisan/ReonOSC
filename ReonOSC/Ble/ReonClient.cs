@@ -118,8 +118,12 @@ public sealed class ReonClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Write an arbitrary 17-byte token while the device is in pair mode (long button press).
-    /// Succeeds even without prior auth — that's the whole point of pair mode.
+    /// Write an arbitrary 17-byte token while the device is in pair mode (long
+    /// button press), then complete the rest of a normal connect (subscribe to
+    /// notifications, populate capabilities, etc.) so the client is usable
+    /// immediately without re-opening the BLE device. Doing pair-then-disconnect
+    /// frequently leaves Windows holding the device handle long enough that the
+    /// next FromBluetoothAddressAsync fails, forcing a process restart.
     /// </summary>
     public async Task PairAsync(ulong bluetoothAddress, byte[] newToken, CancellationToken ct = default)
     {
@@ -130,16 +134,32 @@ public sealed class ReonClient : IAsyncDisposable
         _device = await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress).AsTask(ct)
             ?? throw new InvalidOperationException("BluetoothLEDevice.FromBluetoothAddressAsync returned null.");
 
+        _device.ConnectionStatusChanged += OnConnectionStatusChanged;
+
+        await ReadModelSafeAsync(ct);
+
         var svcResult = await _device.GetGattServicesForUuidAsync(ReonProtocol.ServiceUuid, BluetoothCacheMode.Uncached).AsTask(ct);
         if (svcResult.Status != GattCommunicationStatus.Success || svcResult.Services.Count == 0)
             throw new InvalidOperationException($"Reon GATT service not found: {svcResult.Status}");
-        var authChar = await GetCharAsync(svcResult.Services[0], ReonProtocol.CharAuth, ct);
+        var service = svcResult.Services[0];
+
+        _authChar   = await GetCharAsync(service, ReonProtocol.CharAuth,   ct);
+        _cmdChar    = await GetCharAsync(service, ReonProtocol.CharCmd,    ct);
+        _telemChar  = await GetCharAsync(service, ReonProtocol.CharTelem,  ct);
+        _statusChar = await GetCharAsync(service, ReonProtocol.CharStatus, ct);
 
         Logf($"Writing new bond token: {Convert.ToHexString(newToken).ToLowerInvariant()}");
-        await WriteCharAsync(authChar, newToken, ct);
+        await WriteCharAsync(_authChar, newToken, ct);
+        _authed = true;
 
         TokenStorage.Save(FormatMac(bluetoothAddress), newToken);
         Logf($"Token saved to {TokenStorage.TokenPath}.");
+
+        Logf("Subscribing to telemetry + state notifications …");
+        await EnableNotifyAsync(_cmdChar, OnCmdNotify, ct);
+        await EnableNotifyAsync(_telemChar, OnTelemNotify, ct);
+
+        Logf("Paired and connected.");
     }
 
     public Task SetCoolAsync(int level, CancellationToken ct = default) =>

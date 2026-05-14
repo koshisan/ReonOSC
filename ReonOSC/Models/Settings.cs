@@ -26,6 +26,10 @@ public sealed class Settings
     /// pixel from the SteamVR compositor mirror texture. Requires SteamVR running.</summary>
     public bool EnablePfSignalHook { get; set; } = false;
 
+    /// <summary>Persisted window size. Zero means "use computed default".</summary>
+    public int WindowWidth { get; set; }
+    public int WindowHeight { get; set; }
+
     /// <summary>Last-known Reon BLE MAC. Used for fast reconnect; otherwise we scan by name.</summary>
     public string? LastKnownMac { get; set; }
 

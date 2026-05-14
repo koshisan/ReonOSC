@@ -390,7 +390,44 @@ html, body {
   padding: 0;
 }
 .num-step:hover { background: var(--surface-2); color: var(--text); }
+.num-step:disabled { opacity: 0.45; cursor: default; }
+.num-step:disabled:hover { background: transparent; color: var(--text-muted); }
 .num-step:first-child { border-bottom: 1px solid var(--border); }
+
+.num.disabled { opacity: 0.55; cursor: default; }
+.num.disabled input { cursor: default; }
+
+/* Collapsible card header (Configuration section) */
+.card-header.card-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.card-header.card-toggle:hover .card-title { color: var(--text); }
+
+/* Section subheadings inside a single combined card */
+.config-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+.config-section-title.small {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.config-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 0 2px;
+}
 
 .row {
   display: flex;

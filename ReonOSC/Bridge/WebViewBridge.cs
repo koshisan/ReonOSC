@@ -236,18 +236,34 @@ public sealed class WebViewBridge : IDisposable
             token[0] = 0x01;
             System.Security.Cryptography.RandomNumberGenerator.Fill(token.AsSpan(1));
 
-            await using (var temp = new ReonClient())
+            // If we're already connected from a previous session, drop that first
+            // so PairAsync can take over the BLE handle cleanly.
+            if (_service.Reon.IsConnected)
             {
-                temp.Log += (_, m) => Push("log.line", new { t = Ts(), kind = "info", msg = m });
-                await temp.PairAsync(addr.Value, token);
+                try { await _service.Reon.DisposeAsync(); } catch { }
             }
+
+            // Pair AND fully connect in one shot using the main client, so the
+            // user can issue commands immediately without a separate Connect.
+            await _service.Reon.PairAsync(addr.Value, token);
 
             _settings.LastKnownMac = ReonClient.FormatMac(addr.Value);
             _settings.Save();
             _knownAddress = addr;
+            _connectedAt = DateTime.UtcNow;
 
-            Push("log.line", new { t = Ts(), kind = "ok", msg = "Paired. You can now Connect." });
-            Push("conn.state", new { state = "disconnected", mac = ReonClient.FormatMac(addr.Value) });
+            Push("log.line", new { t = Ts(), kind = "ok", msg = $"Paired and connected{(_service.Reon.Model is { } m ? $" ({m})" : "")}." });
+            Push("conn.state", new
+            {
+                state = "connected",
+                mac = ReonClient.FormatMac(addr.Value),
+                model = _service.Reon.Model,
+                caps = new
+                {
+                    coolMax = _service.Reon.Capabilities.CoolLevelMax,
+                    heatMax = _service.Reon.Capabilities.HeatLevelMax,
+                },
+            });
         }
         catch (Exception ex)
         {
