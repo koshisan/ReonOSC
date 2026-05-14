@@ -47,12 +47,11 @@ public static class ReonProtocol
     public static Telemetry? DecodeTelemetry(ReadOnlySpan<byte> data)
     {
         if (data.Length < 9) return null;
-        float Read(int i) => ((data[1 + 2 * i] << 8) | data[2 + 2 * i]) / 100f;
         return new Telemetry(
-            Board:     Read(0),
-            SkinPlate: Read(1),
-            Heatsink:  Read(2),
-            Ambient:   Read(3)
+            Board:     ((data[1] << 8) | data[2]) / 100f,
+            SkinPlate: ((data[3] << 8) | data[4]) / 100f,
+            Heatsink:  ((data[5] << 8) | data[6]) / 100f,
+            Ambient:   ((data[7] << 8) | data[8]) / 100f
         );
     }
 
