@@ -7,6 +7,7 @@ namespace ReonOSC;
 public sealed class MainForm : Form
 {
     private readonly ControlService _service;
+    private readonly StatusIcons _icons;
     private Settings _settings;
 
     // Connection group
@@ -47,17 +48,22 @@ public sealed class MainForm : Form
     private readonly TextBox _logBox = new();
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 250 };
 
-    public MainForm(ControlService service, Settings settings)
+    public MainForm(ControlService service, Settings settings, StatusIcons icons)
     {
         _service = service;
         _settings = settings;
+        _icons = icons;
 
         Text = "ReonOSC";
+        Icon = _icons.For(IconState.Off);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         AutoScaleMode = AutoScaleMode.Font;
-        MinimumSize = new Size(620, 600);
-        ClientSize = new Size(720, 880);
+        MinimumSize = new Size(620, 480);
+        // Cap height to the screen's working area so the form fits on smaller
+        // displays. Width stays at 720; height is the lesser of 880 and what fits.
+        var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+        ClientSize = new Size(720, Math.Min(880, workArea.Height - 80));
 
         BuildLayout();
         BindControls();
@@ -501,6 +507,12 @@ public sealed class MainForm : Form
         {
             _pairButton.Enabled = true;
         }
+    }
+
+    public void UpdateIconState(IconState state)
+    {
+        if (!IsHandleCreated) { Icon = _icons.For(state); return; }
+        BeginInvoke(() => Icon = _icons.For(state));
     }
 
     private void RefreshOscButton()

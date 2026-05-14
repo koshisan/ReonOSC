@@ -1,3 +1,4 @@
+using ReonOSC.Ble;
 using ReonOSC.Models;
 using ReonOSC.Services;
 
@@ -14,12 +15,13 @@ public sealed class TrayContext : ApplicationContext
     private readonly ControlService _service;
     private readonly MainForm _form;
     private readonly NotifyIcon _tray;
+    private readonly StatusIcons _icons = new();
 
     public TrayContext()
     {
         _settings = Settings.Load();
         _service = new ControlService(_settings);
-        _form = new MainForm(_service, _settings);
+        _form = new MainForm(_service, _settings, _icons);
 
         var menu = new ContextMenuStrip();
         var showItem = new ToolStripMenuItem("Show window") { Font = new Font(menu.Font, FontStyle.Bold) };
@@ -38,12 +40,29 @@ public sealed class TrayContext : ApplicationContext
 
         _tray = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
-            Text = "ReonOSC",
+            Icon = _icons.For(IconState.Off),
+            Text = "ReonOSC — disconnected",
             Visible = true,
             ContextMenuStrip = menu,
         };
         _tray.DoubleClick += (_, _) => ShowForm();
+
+        // Reflect device state in the tray icon and tooltip.
+        _service.CommandSent += (_, cmd) =>
+        {
+            var iconState = cmd.Mode switch
+            {
+                ReonProtocol.Mode.Cool => IconState.Cool,
+                ReonProtocol.Mode.Heat => IconState.Heat,
+                ReonProtocol.Mode.Smart => IconState.Smart,
+                _ => IconState.Off,
+            };
+            _tray.Icon = _icons.For(iconState);
+            _tray.Text = cmd.Mode == ReonProtocol.Mode.Stop
+                ? "ReonOSC — idle"
+                : $"ReonOSC — {cmd.Mode} L{cmd.Level}";
+            _form.UpdateIconState(iconState);
+        };
 
         // Ensure the form handle exists even if we never show the window, so
         // BeginInvoke for log events works correctly.
@@ -86,6 +105,7 @@ public sealed class TrayContext : ApplicationContext
         }
         catch { }
         try { _ = _service.DisposeAsync(); } catch { }
+        try { _icons.Dispose(); } catch { }
         base.ExitThreadCore();
     }
 }
