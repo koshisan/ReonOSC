@@ -15,6 +15,39 @@
 <body>
   <div id="root"></div>
 
+  <!-- Visible error catcher so we don't get a blank window if a script throws. -->
+  <script>
+    (function () {
+      function show(text) {
+        const root = document.getElementById('root');
+        if (!root) return;
+        root.innerHTML =
+          '<pre style="white-space:pre-wrap;color:#f87171;background:#1a1f29;padding:24px;margin:0;' +
+          'min-height:100vh;font:13px/1.5 ui-monospace, Consolas, monospace;">' +
+          text.replace(/[<&]/g, c => c === '<' ? '&lt;' : '&amp;') + '</pre>';
+      }
+      window.addEventListener('error', (e) => {
+        show('[script error]\n' + (e.message || '') +
+          (e.filename ? '\n  at ' + e.filename + ':' + e.lineno + ':' + e.colno : '') +
+          (e.error && e.error.stack ? '\n\n' + e.error.stack : ''));
+      });
+      window.addEventListener('unhandledrejection', (e) => {
+        show('[unhandled promise rejection]\n' + (e.reason && (e.reason.stack || e.reason.message) || e.reason));
+      });
+      // If nothing rendered after 6s, dump a diagnostic.
+      setTimeout(() => {
+        if (document.getElementById('root') && !document.getElementById('root').firstChild) {
+          show('[boot timeout — nothing rendered after 6s]\n' +
+            'React loaded: ' + !!window.React + '\n' +
+            'ReactDOM loaded: ' + !!window.ReactDOM + '\n' +
+            'Babel loaded: ' + !!window.Babel + '\n' +
+            'reonBridge loaded: ' + !!window.reonBridge + '\n' +
+            'ReonDevice loaded: ' + !!window.ReonDevice);
+        }
+      }, 6000);
+    })();
+  </script>
+
   <!-- Theme: follow the OS unless the user has explicitly toggled (which writes
        reon.theme into localStorage). Done inline to avoid FOUC. -->
   <script>

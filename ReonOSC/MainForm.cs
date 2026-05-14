@@ -56,11 +56,9 @@ public sealed class MainForm : Form
                 webFolder,
                 CoreWebView2HostResourceAccessKind.Allow);
 
-            // Lock down what the page can do — no devtools menu unless debugging.
-#if !DEBUG
-            core.Settings.AreDevToolsEnabled = false;
-            core.Settings.AreDefaultContextMenusEnabled = false;
-#endif
+            // Leave DevTools available — right-click → Inspect from anywhere.
+            core.Settings.AreDevToolsEnabled = true;
+            core.Settings.AreDefaultContextMenusEnabled = true;
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsZoomControlEnabled = false;
 
