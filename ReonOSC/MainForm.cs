@@ -49,16 +49,52 @@ public sealed class MainForm : Form
         Controls.Add(_web);
         _ = InitWebViewAsync();
 
-        // Persist the size when the user finishes resizing the window.
+        // Persist the size on the events that actually fire reliably:
+        //   ResizeEnd  — after a drag resize
+        //   Resize     — after a Maximize / Restore (doesn't fire ResizeEnd)
+        //   FormClosing — final failsafe
         ResizeEnd += (_, _) => SaveWindowSize();
+        Resize    += OnResizeMaybeSave;
+        FormClosing += (_, _) => SaveWindowSize();
+    }
+
+    private FormWindowState _lastWindowState = FormWindowState.Normal;
+    private void OnResizeMaybeSave(object? sender, EventArgs e)
+    {
+        // Resize fires very often during a drag; ResizeEnd handles those.
+        // Only persist here when the WindowState actually changed (Restore /
+        // Maximize / Minimize), since those don't raise ResizeEnd.
+        if (WindowState == _lastWindowState) return;
+        _lastWindowState = WindowState;
+        SaveWindowSize();
     }
 
     private void SaveWindowSize()
     {
-        if (WindowState != FormWindowState.Normal) return;
-        if (_settings.WindowWidth == ClientSize.Width && _settings.WindowHeight == ClientSize.Height) return;
-        _settings.WindowWidth = ClientSize.Width;
-        _settings.WindowHeight = ClientSize.Height;
+        // When maximised, ClientSize is the maximised area — useless for next
+        // launch. Use RestoreBounds (which carries the size the window had
+        // before maximise) and subtract the chrome to get an equivalent
+        // ClientSize value.
+        int w, h;
+        if (WindowState == FormWindowState.Normal)
+        {
+            w = ClientSize.Width;
+            h = ClientSize.Height;
+        }
+        else if (WindowState == FormWindowState.Maximized && !RestoreBounds.IsEmpty)
+        {
+            var chrome = Size - ClientSize;
+            w = Math.Max(MinimumSize.Width,  RestoreBounds.Width  - chrome.Width);
+            h = Math.Max(MinimumSize.Height, RestoreBounds.Height - chrome.Height);
+        }
+        else
+        {
+            return; // minimised — don't overwrite stored size
+        }
+
+        if (_settings.WindowWidth == w && _settings.WindowHeight == h) return;
+        _settings.WindowWidth = w;
+        _settings.WindowHeight = h;
         try { _settings.Save(); } catch { /* ignore */ }
     }
 
