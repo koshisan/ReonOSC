@@ -333,41 +333,74 @@ public sealed class PfSignalReader : IDisposable
     }
 
     /// <summary>
-    /// Choose / upgrade the capture backend. Priority is OpenVR &gt; DXGI &gt; none.
-    /// If we're already on the highest-priority available backend, no-op.
+    /// Choose / upgrade the capture backend. OpenVR's mirror is preferred but
+    /// ONLY when VRChat is the active SteamVR scene application — otherwise
+    /// we'd be sampling SteamVR Home or whichever other VR app holds the
+    /// scene, which has nothing to do with the PFSignal pixel in VRChat's
+    /// rendering. In that case we want Desktop Duplication of VRChat's window.
     /// </summary>
     private void PickBestBackend()
     {
-        // Already on OpenVR — best possible, no work needed.
-        if (ActiveBackend == CaptureBackend.OpenVrMirror) return;
+        // If we're already on OpenVR, verify VRChat is still the scene app.
+        // If not, downgrade so the next pick can switch to DXGI.
+        if (ActiveBackend == CaptureBackend.OpenVrMirror)
+        {
+            if (IsVrChatTheVrScene()) return;
+            Logf("OpenVR scene focus isn't VRChat — downgrading to Desktop Duplication.");
+            ShutdownOpenVR();
+            ActiveBackend = CaptureBackend.None;
+        }
 
-        // OpenVR became available — switch up.
+        // Consider OpenVR only if SteamVR is up AND VRChat is the scene app.
         if (IsSteamVrRunning() && TryInitOpenVR())
         {
-            if (ActiveBackend == CaptureBackend.DesktopDuplication)
+            if (IsVrChatTheVrScene())
             {
-                Logf("SteamVR came up — switching from Desktop Duplication to OpenVR mirror.");
-                try { _duplication?.Dispose(); } catch { }
-                _duplication = null;
-                _vrchatHwnd = IntPtr.Zero;
+                if (ActiveBackend == CaptureBackend.DesktopDuplication)
+                {
+                    Logf("VRChat is now the SteamVR scene — switching from Desktop to OpenVR mirror.");
+                    try { _duplication?.Dispose(); } catch { }
+                    _duplication = null;
+                    _vrchatHwnd = IntPtr.Zero;
+                }
+                else
+                {
+                    Logf("OpenVR mirror backend active (VRChat is the VR scene).");
+                }
+                ActiveBackend = CaptureBackend.OpenVrMirror;
+                return;
             }
             else
             {
-                Logf("OpenVR mirror backend active.");
+                // Init succeeded but VRChat isn't the scene app (it's running
+                // in desktop mode, or a different VR app has the scene focus).
+                // Tear OpenVR back down to avoid sampling the wrong content.
+                ShutdownOpenVR();
             }
-            ActiveBackend = CaptureBackend.OpenVrMirror;
-            return;
         }
 
-        // Already on DXGI — fine, keep going.
         if (ActiveBackend == CaptureBackend.DesktopDuplication) return;
-
-        // Nothing yet — try DXGI.
         if (TryInitDesktopDuplication())
         {
             ActiveBackend = CaptureBackend.DesktopDuplication;
             Logf("Desktop Duplication backend active (capturing VRChat window).");
         }
+    }
+
+    /// <summary>True if the SteamVR scene focus is currently a process named
+    /// 'VRChat'. Relies on OpenVR already being initialised.</summary>
+    private static bool IsVrChatTheVrScene()
+    {
+        try
+        {
+            var apps = OpenVR.Applications;
+            if (apps is null) return false;
+            uint pid = apps.GetCurrentSceneProcessId();
+            if (pid == 0) return false;
+            using var p = System.Diagnostics.Process.GetProcessById((int)pid);
+            return string.Equals(p.ProcessName, "VRChat", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     /// <summary>Tear down whichever backend is currently active so PickBestBackend
