@@ -63,23 +63,55 @@ function Sparkline({ data, color, height = 48 }) {
   );
 }
 
-/* ---------- NumInput ---------- */
-function NumInput({ value, onChange, min = 0, max = 9999, step = 1, width }) {
-  const set = (v) => {
-    if (Number.isNaN(v)) return;
-    onChange(Math.max(min, Math.min(max, v)));
+/* ---------- NumInput ----------
+ *
+ * Lets the user type freely (no clamping per keystroke) and commits the value
+ * on Blur / Enter, when it's clamped to [min, max]. The arrow buttons commit
+ * immediately because there's no half-typed state involved.
+ *
+ * When `disabled` is true the input is readonly and visually dimmed.
+ */
+function NumInput({ value, onChange, min = 0, max = 9999, step = 1, width, disabled = false }) {
+  const [draft, setDraft] = useState(String(value));
+
+  // Sync external value changes into the draft when the user isn't editing.
+  useEffect(() => { setDraft(String(value)); }, [value]);
+
+  const commit = (raw) => {
+    const n = Number(raw);
+    if (Number.isNaN(n)) { setDraft(String(value)); return; }
+    const clamped = Math.max(min, Math.min(max, Math.round(n)));
+    setDraft(String(clamped));
+    if (clamped !== value) onChange(clamped);
   };
+
+  const bump = (delta) => {
+    if (disabled) return;
+    const n = Number(draft);
+    const base = Number.isNaN(n) ? value : n;
+    const clamped = Math.max(min, Math.min(max, base + delta));
+    setDraft(String(clamped));
+    onChange(clamped);
+  };
+
   return (
-    <span className="num" style={width ? { width } : null}>
+    <span className={`num${disabled ? " disabled" : ""}`} style={width ? { width } : null}>
       <input
         type="number"
-        value={value}
+        value={draft}
         min={min} max={max} step={step}
-        onChange={(e) => set(Number(e.target.value))}
+        readOnly={disabled}
+        disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { commit(e.currentTarget.value); e.currentTarget.blur(); }
+          else if (e.key === "Escape") { setDraft(String(value)); e.currentTarget.blur(); }
+        }}
       />
       <span className="num-steppers">
-        <button className="num-step" onClick={() => set(Number(value) + step)} aria-label="up">▲</button>
-        <button className="num-step" onClick={() => set(Number(value) - step)} aria-label="down">▼</button>
+        <button className="num-step" onClick={() => bump(step)} disabled={disabled} aria-label="up">▲</button>
+        <button className="num-step" onClick={() => bump(-step)} disabled={disabled} aria-label="down">▼</button>
       </span>
     </span>
   );
@@ -412,8 +444,10 @@ function App() {
   };
 
   const onPortChange = (v) => {
+    // The port input is locked while OSC is running, so we only see commits
+    // in the stopped state. Just remember the user's choice; the next Start
+    // click sends it to the bridge.
     setOscPort(v);
-    if (hosted && oscRunning) send("osc.start", { port: v });
   };
 
   const onAddressChange = (key, value) => {
@@ -502,7 +536,15 @@ function App() {
             <div className="card-body">
               <div className="row" style={{gap: 14}}>
                 <span className="field-label" style={{width: 70}}>UDP port</span>
-                <NumInput value={oscPort} onChange={onPortChange} min={1024} max={65535} step={1} width={96}/>
+                <NumInput
+                  value={oscPort}
+                  onChange={onPortChange}
+                  min={1024}
+                  max={65535}
+                  step={1}
+                  width={96}
+                  disabled={oscRunning}
+                />
                 <button className={`btn ${oscRunning ? "danger" : "primary"}`} onClick={toggleOsc}>
                   {oscRunning ? <><Icon name="stop"/> Stop</> : <><Icon name="play"/> Start</>}
                 </button>

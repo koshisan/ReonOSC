@@ -68,10 +68,14 @@ public sealed class TrayContext : ApplicationContext
         // the WebView2 can initialise and log events have somewhere to land.
         _ = _form.Handle;
 
-        if (_settings.OscPort > 0)
+        // OSC listener always starts on boot. Sanity-check the port first so a
+        // bad persisted value doesn't leave the listener silent forever.
+        if (_settings.OscPort < 1024 || _settings.OscPort > 65535)
         {
-            try { _service.StartOsc(); } catch { /* surfaced via bridge log */ }
+            _settings.OscPort = 9001;
+            try { _settings.Save(); } catch { }
         }
+        try { _service.StartOsc(); } catch { /* surfaced via bridge log */ }
         if (_settings.EnablePfSignalHook)
         {
             try { _service.PfSignal.Start(); } catch { /* surfaced via bridge log */ }

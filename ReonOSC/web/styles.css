@@ -390,7 +390,12 @@ html, body {
   padding: 0;
 }
 .num-step:hover { background: var(--surface-2); color: var(--text); }
+.num-step:disabled { opacity: 0.45; cursor: default; }
+.num-step:disabled:hover { background: transparent; color: var(--text-muted); }
 .num-step:first-child { border-bottom: 1px solid var(--border); }
+
+.num.disabled { opacity: 0.55; cursor: default; }
+.num.disabled input { cursor: default; }
 
 .row {
   display: flex;
