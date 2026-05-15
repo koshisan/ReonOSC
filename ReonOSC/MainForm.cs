@@ -17,14 +17,16 @@ public sealed class MainForm : Form
     private readonly ControlService _service;
     private readonly Settings _settings;
     private readonly StatusIcons _icons;
+    private readonly MqttPublisher _mqtt;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     private WebViewBridge? _bridge;
 
-    public MainForm(ControlService service, Settings settings, StatusIcons icons)
+    public MainForm(ControlService service, Settings settings, StatusIcons icons, MqttPublisher mqtt)
     {
         _service = service;
         _settings = settings;
         _icons = icons;
+        _mqtt = mqtt;
 
         Text = "ReonOSC";
         Icon = _icons.For(IconState.Off);
@@ -123,7 +125,7 @@ public sealed class MainForm : Form
             // Doing it from NavigationCompleted loses that first message and
             // OnUiReady never runs — which means the OSC retry/log path
             // doesn't run either.
-            _bridge ??= new WebViewBridge(_web, _service, _settings);
+            _bridge ??= new WebViewBridge(_web, _service, _settings, _mqtt);
 
             core.Navigate("https://reonosc.local/index.html");
         }

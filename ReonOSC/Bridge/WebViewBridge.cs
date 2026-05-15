@@ -24,6 +24,7 @@ public sealed class WebViewBridge : IDisposable
 
     private readonly WebView2 _web;
     private readonly ControlService _service;
+    private readonly MqttPublisher _mqtt;
     private readonly System.Threading.SynchronizationContext? _uiCtx;
     private Settings _settings;
     private DateTime? _connectedAt;
@@ -32,11 +33,12 @@ public sealed class WebViewBridge : IDisposable
     private long _lastPushedPacketCount = -1;
     private string _lastPfHex = "#000000";
 
-    public WebViewBridge(WebView2 web, ControlService service, Settings settings)
+    public WebViewBridge(WebView2 web, ControlService service, Settings settings, MqttPublisher mqtt)
     {
         _web = web;
         _service = service;
         _settings = settings;
+        _mqtt = mqtt;
         _uiCtx = System.Threading.SynchronizationContext.Current;
 
         _web.CoreWebView2.WebMessageReceived += OnWebMessage;
@@ -67,6 +69,9 @@ public sealed class WebViewBridge : IDisposable
         // pixel updates on every render frame (head motion, animations, etc.),
         // which would flood the log. The live swatch in the GUI is the
         // observation surface.
+
+        _mqtt.Log += (_, msg) => Push("log.line", new { t = Ts(), kind = ClassifyLog(msg), msg });
+        _mqtt.StateChanged += (_, _) => PushMqttState();
 
         // Poll the OSC packet counter every 500 ms and push osc.state when it
         // changes, so the UI can show a live 'X packets' counter without per-
@@ -144,6 +149,7 @@ public sealed class WebViewBridge : IDisposable
             case "options.set":    SetOptions(payload); break;
             case "pfHook.toggle":  TogglePfHook(payload); break;
             case "pfSignal.capture": CapturePfSignal(payload); break;
+            case "mqtt.set":       SetMqtt(payload); break;
             case "log.clear":      /* the UI owns its own log buffer */ break;
             default: Push("log.line", new { t = Ts(), kind = "err", msg = $"Unknown command: {cmd}" }); break;
         }
@@ -168,7 +174,20 @@ public sealed class WebViewBridge : IDisposable
             startMinimised = _settings.StartMinimised,
             autoConnectOnStart = _settings.AutoConnectOnStart,
             enablePfSignalHook = _settings.EnablePfSignalHook,
+            mqtt = new
+            {
+                enabled = _settings.MqttEnabled,
+                host = _settings.MqttHost,
+                port = _settings.MqttPort,
+                username = _settings.MqttUsername,
+                // Password intentionally NOT echoed back to the UI — the user
+                // types it once, we keep it in settings.json, and the field
+                // shows empty on reload (placeholder behaviour).
+                baseTopic = _settings.MqttBaseTopic,
+                discoveryPrefix = _settings.MqttDiscoveryPrefix,
+            },
         });
+        PushMqttState();
         Push("pf.signal", new { running = _service.PfSignal.IsRunning, hex = "—" });
         // If TrayContext's silent auto-start didn't bring OSC up (port collision,
         // permission, etc.), retry here so the user sees the failure in the log
@@ -473,6 +492,41 @@ public sealed class WebViewBridge : IDisposable
         }
         Push("pf.signal", new { running = _service.PfSignal.IsRunning, hex = "—" });
     }
+
+    private void SetMqtt(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return;
+
+        if (payload.TryGetProperty("enabled", out var en) && (en.ValueKind is JsonValueKind.True or JsonValueKind.False))
+            _settings.MqttEnabled = en.GetBoolean();
+        if (payload.TryGetProperty("host", out var h) && h.ValueKind == JsonValueKind.String)
+            _settings.MqttHost = h.GetString() ?? "";
+        if (payload.TryGetProperty("port", out var p) && p.TryGetInt32(out var port) && port is > 0 and <= 65535)
+            _settings.MqttPort = port;
+        if (payload.TryGetProperty("username", out var u) && u.ValueKind == JsonValueKind.String)
+            _settings.MqttUsername = u.GetString() ?? "";
+        // Password only updates when the user actually typed something — the
+        // field arrives empty on a no-op reload (we never echo it back).
+        if (payload.TryGetProperty("password", out var pw) && pw.ValueKind == JsonValueKind.String)
+        {
+            var s = pw.GetString() ?? "";
+            if (!string.IsNullOrEmpty(s)) _settings.MqttPassword = s;
+        }
+        if (payload.TryGetProperty("baseTopic", out var b) && b.ValueKind == JsonValueKind.String)
+            _settings.MqttBaseTopic = b.GetString() ?? "reonosc";
+        if (payload.TryGetProperty("discoveryPrefix", out var d) && d.ValueKind == JsonValueKind.String)
+            _settings.MqttDiscoveryPrefix = d.GetString() ?? "";
+
+        _settings.Save();
+        _mqtt.ApplySettings(_settings);
+    }
+
+    private void PushMqttState()
+        => Push("mqtt.state", new
+        {
+            state = _mqtt.CurrentState.ToString(),
+            error = _mqtt.LastError,
+        });
 
     private void SetOptions(JsonElement payload)
     {

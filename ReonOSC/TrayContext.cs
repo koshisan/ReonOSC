@@ -13,6 +13,7 @@ public sealed class TrayContext : ApplicationContext
 {
     private readonly Settings _settings;
     private readonly ControlService _service;
+    private readonly MqttPublisher _mqtt;
     private readonly MainForm _form;
     private readonly NotifyIcon _tray;
     private readonly StatusIcons _icons = new();
@@ -21,7 +22,8 @@ public sealed class TrayContext : ApplicationContext
     {
         _settings = Settings.Load();
         _service = new ControlService(_settings);
-        _form = new MainForm(_service, _settings, _icons);
+        _mqtt = new MqttPublisher(_service, _settings);
+        _form = new MainForm(_service, _settings, _icons, _mqtt);
 
         var menu = new ContextMenuStrip();
         var showItem = new ToolStripMenuItem("Show window") { Font = new Font(menu.Font, FontStyle.Bold) };
@@ -80,6 +82,9 @@ public sealed class TrayContext : ApplicationContext
         {
             try { _service.PfSignal.Start(); } catch { /* surfaced via bridge log */ }
         }
+        // MQTT publisher autostarts only when the user has configured a broker
+        // and toggled it on. Failures land in the GUI log via the bridge.
+        _ = _mqtt.StartAsync();
 
         if (!_settings.StartMinimised)
             ShowForm();
@@ -104,6 +109,7 @@ public sealed class TrayContext : ApplicationContext
             _tray.Dispose();
         }
         catch { }
+        try { _ = _mqtt.DisposeAsync(); } catch { }
         try { _ = _service.DisposeAsync(); } catch { }
         try { _icons.Dispose(); } catch { }
         base.ExitThreadCore();

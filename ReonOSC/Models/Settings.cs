@@ -40,6 +40,21 @@ public sealed class Settings
     public string AddrCold      { get; set; } = "/ChairOSC/v1/cold";
     public string AddrHeat      { get; set; } = "/ChairOSC/v1/heat";
 
+    // MQTT publish — pushes the current state (mode/level/source, connection,
+    // telemetry) to a broker so Home Assistant can mirror the device and react
+    // (e.g. turn on the AC when we go into Cool).
+    public bool MqttEnabled { get; set; } = false;
+    public string MqttHost { get; set; } = "";
+    public int MqttPort { get; set; } = 1883;
+    public string MqttUsername { get; set; } = "";
+    public string MqttPassword { get; set; } = "";
+    /// <summary>Root topic. State lives at <c>{base}/state</c>, availability at
+    /// <c>{base}/availability</c>.</summary>
+    public string MqttBaseTopic { get; set; } = "reonosc";
+    /// <summary>Prefix for Home Assistant MQTT Discovery. Empty string disables
+    /// discovery (HA users on a non-default prefix can also retarget here).</summary>
+    public string MqttDiscoveryPrefix { get; set; } = "homeassistant";
+
     public static string ConfigDir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "reon");
 
