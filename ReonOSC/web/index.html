@@ -51,7 +51,7 @@
   <!-- Theme: follow the OS unless the user has explicitly toggled (which writes
        reon.theme into localStorage). Done inline to avoid FOUC. -->
   <script>
-    window.__TWEAKS_DEFAULTS = { theme: "system", showSparkline: true, compactLog: false };
+    window.__TWEAKS_DEFAULTS = { theme: "system", showSparkline: true };
     (function () {
       const saved = localStorage.getItem('reon.theme');
       const osDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;

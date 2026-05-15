@@ -151,7 +151,6 @@ function App() {
   const [osDark, setOsDark] = useState(() =>
     window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
   const [showSparkline, setShowSparkline] = useState(() => localStorage.getItem("reon.spark") !== "0");
-  const [compactLog, setCompactLog] = useState(() => localStorage.getItem("reon.compactlog") === "1");
 
   // Subscribe to OS theme changes — keeps "system" mode live.
   useEffect(() => {
@@ -181,11 +180,18 @@ function App() {
     p === "system" ? "light" : p === "light" ? "dark" : "system");
 
   useEffect(() => { localStorage.setItem("reon.spark", showSparkline ? "1" : "0"); }, [showSparkline]);
-  useEffect(() => { localStorage.setItem("reon.compactlog", compactLog ? "1" : "0"); }, [compactLog]);
 
-  // Configuration section collapsed by default; persist the user's choice.
-  const [configOpen, setConfigOpen] = useState(() => localStorage.getItem("reon.configOpen") === "1");
-  useEffect(() => { localStorage.setItem("reon.configOpen", configOpen ? "1" : "0"); }, [configOpen]);
+  // Left column has two collapsible panels (Configuration, Log) that are
+  // mutually exclusive — only one open at a time. null means both collapsed.
+  const [openPanel, setOpenPanel] = useState(() => {
+    const v = localStorage.getItem("reon.openPanel");
+    return v === "config" || v === "log" ? v : null;
+  });
+  useEffect(() => {
+    if (openPanel) localStorage.setItem("reon.openPanel", openPanel);
+    else localStorage.removeItem("reon.openPanel");
+  }, [openPanel]);
+  const togglePanel = (which) => setOpenPanel((p) => (p === which ? null : which));
 
   const hosted = !!(window.reonBridge && window.reonBridge.isHosted);
   const send = useCallback((cmd, payload) => {
@@ -514,79 +520,22 @@ function App() {
        full height. */
     <div className="app" style={{gridTemplateRows: "1fr"}}>
       <main className="main">
-        {/* Controls panel */}
+        {/* Controls panel — left column. Two mutually-exclusive collapsibles
+            (Configuration / Log) so only one is open at a time. */}
         <section className="controls-panel">
-          {/* Reon connection */}
-          <div className="card">
-            <div className="card-header">
-              <div className="card-title"><span className="dot"/>Reon connection</div>
-              <span className={`pill ${connPillProps.cls}`}>
-                <span className={`pulse ${connPillProps.dot}`}/>
-                {connPillProps.label}
-              </span>
-            </div>
-            <div className="card-body">
-              <div className="row between">
-                <span className="mac-addr">{connState === "connected" ? macAddr : "—"}</span>
-                <div className="actions">
-                  <button className="btn" onClick={doConnect}
-                    disabled={connState === "connected" || connState === "connecting"}>
-                    <Icon name="link"/> Connect
-                  </button>
-                  <button className="btn" onClick={doDisconnect} disabled={connState !== "connected"}>
-                    <Icon name="unlink"/> Disconnect
-                  </button>
-                  <button className="btn" onClick={doPair} disabled={connState === "pairing"}>
-                    <Icon name="bluetooth"/> Pair…
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Manual control */}
-          <div className="card">
-            <div className="card-header">
-              <div className="card-title"><span className="dot"/>Manual control</div>
-              <label className="toggle">
-                <input type="checkbox" checked={manualOverride} onChange={(e) => onOverrideChange(e.target.checked)}/>
-                <span className="toggle-track"/>
-                <span className={`toggle-label ${manualOverride ? "strong" : ""}`}>Override OSC</span>
-              </label>
-            </div>
-            <div className="card-body" style={{opacity: manualOverride ? 1 : 0.5, pointerEvents: manualOverride ? "auto" : "none", transition: "opacity 0.2s"}}>
-              <div className="row" style={{gap: 16}}>
-                <span className="field-label" style={{width: 50}}>Mode</span>
-                <div className="seg">
-                  {MODES.map((m) => (
-                    <button key={m} className={`seg-btn ${manualMode === m ? `active ${m.toLowerCase()}` : ""}`}
-                      onClick={() => onManualModeChange(m)}>{m}</button>
-                  ))}
-                </div>
-                <span className="field-label" style={{width: 50, marginLeft: 12}}>Level</span>
-                <LevelBars
-                  value={manualLevel}
-                  onChange={onManualLevelChange}
-                  color={manualMode === "Cool" ? "#4ab8ff" : manualMode === "Heat" ? "#ff7a3d" : null}
-                  max={manualMode === "Heat" ? caps.heatMax : caps.coolMax}
-                />
-              </div>
-            </div>
-          </div>
-
           {/* Configuration — collapsible: OSC, addresses, preset levels, options */}
           <div className="card">
-            <div className="card-header card-toggle" onClick={() => setConfigOpen((v) => !v)}>
+            <div className="card-header card-toggle" onClick={() => togglePanel("config")}>
               <div className="card-title"><span className="dot"/>Configuration</div>
               <div style={{display: "flex", alignItems: "center", gap: 10}}>
                 <span className={`pill ${oscRunning ? "connected" : "disconnected"}`}>
                   <span className={`pulse ${oscRunning ? "" : "off"}`} style={oscRunning ? {background: "var(--accent)", boxShadow: `0 0 0 0 ${accent}80`} : null}/>
                   {oscRunning ? `OSC ${oscPort} · ${oscPackets} pkt` : "OSC off"}
                 </span>
-                <Icon name={configOpen ? "chevU" : "chevD"} size={14}/>
+                <Icon name={openPanel === "config" ? "chevU" : "chevD"} size={14}/>
               </div>
             </div>
-            {configOpen && (
+            {openPanel === "config" && (
               <div className="card-body">
                 {/* OSC server */}
                 <div className="config-section-title">OSC server</div>
@@ -612,8 +561,9 @@ function App() {
                   OSC addresses <span style={{color: "var(--text-muted)", fontWeight: 400, textTransform: "none", letterSpacing: 0}}>— edit to match your sender</span>
                 </div>
 
+                {/* PFHotHigh is intentionally NOT exposed here — its address is
+                    fixed for backward compatibility with the Pebble Feel sender. */}
                 {[
-                  { key: "PFHotHigh", label: "PFHotHigh", type: "bool" },
                   { key: "water",     label: "water",     type: "bool" },
                   { key: "cold",      label: "cold",      type: "float" },
                   { key: "heat",      label: "heat",      type: "float" },
@@ -737,21 +687,106 @@ function App() {
               </div>
             )}
           </div>
+
+          {/* Log — collapsible, mutually exclusive with Configuration above */}
+          <div className="card">
+            <div className="card-header card-toggle" onClick={() => togglePanel("log")}>
+              <div className="card-title"><span className="dot"/>Log</div>
+              <div style={{display: "flex", alignItems: "center", gap: 10}}>
+                <span className="tag mono" style={{color: "var(--text-muted)"}}>
+                  {log.length} {log.length === 1 ? "line" : "lines"}
+                </span>
+                {openPanel === "log" && (
+                  <button
+                    className="btn ghost"
+                    style={{padding: "4px 8px"}}
+                    onClick={(e) => { e.stopPropagation(); onClearLog(); }}
+                    title="Clear log"
+                  >
+                    <Icon name="trash" size={12}/>
+                  </button>
+                )}
+                <Icon name={openPanel === "log" ? "chevU" : "chevD"} size={14}/>
+              </div>
+            </div>
+            {openPanel === "log" && (
+              <div className="log-body" ref={logBodyRef}>
+                {log.map((l, i) => (
+                  <div className={`log-line ${l.k}`} key={i}>
+                    <span className="log-time">{l.t}</span>
+                    <span className="log-icon">
+                      {l.k === "ok" ? "✓" : l.k === "err" ? "✕" : l.k === "cool" ? "❄" : l.k === "heat" ? "🔥" : l.k === "stop" ? "■" : "›"}
+                    </span>
+                    <span className="log-msg">{typeof l.msg === "string" ? l.msg : l.msg}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
 
-        {/* Device panel */}
+        {/* Device panel — right column. Holds the connection + manual cards
+            on top (relocated from the left column), then the device hero. */}
         <section className="device-panel">
-          <div className="device-toolbar">
-            <div className="device-toolbar-left">
-              <span className="mini-stat">
-                {manualOverride
-                  ? "MANUAL"
-                  : (currentSource ? currentSource.toUpperCase() : "OSC")}
+          {/* Reon connection */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>Reon connection</div>
+              <span className={`pill ${connPillProps.cls}`}>
+                <span className={`pulse ${connPillProps.dot}`}/>
+                {connPillProps.label}
               </span>
             </div>
-            <div className="device-toolbar-right">
-              {fw && <span className="mini-stat">FW {fw}</span>}
-              {battery != null && <span className="mini-stat">⛁ {battery}%</span>}
+            <div className="card-body">
+              <div className="row between" style={{flexWrap: "wrap", gap: 10}}>
+                <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap"}}>
+                  <span className="mac-addr">{connState === "connected" ? macAddr : "—"}</span>
+                  {fw && <span className="tag mono">FW {fw}</span>}
+                  {battery != null && <span className="tag mono">⛁ {battery}%</span>}
+                </div>
+                <div className="actions">
+                  <button className="btn" onClick={doConnect}
+                    disabled={connState === "connected" || connState === "connecting"}>
+                    <Icon name="link"/> Connect
+                  </button>
+                  <button className="btn" onClick={doDisconnect} disabled={connState !== "connected"}>
+                    <Icon name="unlink"/> Disconnect
+                  </button>
+                  <button className="btn" onClick={doPair} disabled={connState === "pairing"}>
+                    <Icon name="bluetooth"/> Pair…
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Manual control */}
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title"><span className="dot"/>Manual control</div>
+              <label className="toggle">
+                <input type="checkbox" checked={manualOverride} onChange={(e) => onOverrideChange(e.target.checked)}/>
+                <span className="toggle-track"/>
+                <span className={`toggle-label ${manualOverride ? "strong" : ""}`}>Override OSC</span>
+              </label>
+            </div>
+            <div className="card-body" style={{opacity: manualOverride ? 1 : 0.5, pointerEvents: manualOverride ? "auto" : "none", transition: "opacity 0.2s"}}>
+              <div className="row" style={{gap: 16, flexWrap: "wrap"}}>
+                <span className="field-label" style={{width: 50}}>Mode</span>
+                <div className="seg">
+                  {MODES.map((m) => (
+                    <button key={m} className={`seg-btn ${manualMode === m ? `active ${m.toLowerCase()}` : ""}`}
+                      onClick={() => onManualModeChange(m)}>{m}</button>
+                  ))}
+                </div>
+                <span className="field-label" style={{width: 50, marginLeft: 12}}>Level</span>
+                <LevelBars
+                  value={manualLevel}
+                  onChange={onManualLevelChange}
+                  color={manualMode === "Cool" ? "#4ab8ff" : manualMode === "Heat" ? "#ff7a3d" : null}
+                  max={manualMode === "Heat" ? caps.heatMax : caps.coolMax}
+                />
+              </div>
             </div>
           </div>
 
@@ -812,34 +847,6 @@ function App() {
                 </div>
               ))}
             </div>
-          </div>
-        </section>
-
-        {/* Log */}
-        <section className={`log-panel ${compactLog ? "compact" : ""}`}>
-          <div className="log-head">
-            <div className="log-tabs">
-              <span className="log-tab active">Log</span>
-            </div>
-            <div className="log-actions">
-              <button className="btn ghost" style={{padding: "4px 8px"}} onClick={() => setCompactLog((v) => !v)}>
-                <Icon name={compactLog ? "chevU" : "chevD"} size={12}/>
-              </button>
-              <button className="btn ghost" style={{padding: "4px 8px"}} onClick={onClearLog}>
-                <Icon name="trash" size={12}/>
-              </button>
-            </div>
-          </div>
-          <div className="log-body" ref={logBodyRef}>
-            {log.map((l, i) => (
-              <div className={`log-line ${l.k}`} key={i}>
-                <span className="log-time">{l.t}</span>
-                <span className="log-icon">
-                  {l.k === "ok" ? "✓" : l.k === "err" ? "✕" : l.k === "cool" ? "❄" : l.k === "heat" ? "🔥" : l.k === "stop" ? "■" : "›"}
-                </span>
-                <span className="log-msg">{typeof l.msg === "string" ? l.msg : l.msg}</span>
-              </div>
-            ))}
           </div>
         </section>
       </main>

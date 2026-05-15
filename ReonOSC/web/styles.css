@@ -122,14 +122,13 @@ html, body {
   letter-spacing: -0.05em;
 }
 
-/* Main grid */
+/* Main grid — single row, two columns. Configuration/Log live on the left,
+   Connection/Manual/Device hero on the right. */
 .main {
   display: grid;
-  grid-template-columns: 1fr 520px;
-  grid-template-rows: 1fr auto;
-  grid-template-areas:
-    "controls device"
-    "log log";
+  grid-template-columns: 1fr 560px;
+  grid-template-rows: 1fr;
+  grid-template-areas: "controls device";
   min-height: 0;
   overflow: hidden;
 }
@@ -142,30 +141,21 @@ html, body {
     var(--bg);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
   position: relative;
+  padding: 14px 16px 18px;
+  gap: 12px;
 }
 
 .controls-panel {
   grid-area: controls;
   overflow-y: auto;
-  padding: 18px 20px 24px;
+  padding: 14px 16px 18px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-}
-
-.log-panel {
-  grid-area: log;
-  border-top: 1px solid var(--border);
-  background: var(--bg-2);
-  display: grid;
-  grid-template-rows: 32px 1fr;
+  gap: 12px;
   min-height: 0;
-  max-height: 240px;
-  transition: max-height 0.3s ease;
 }
-.log-panel.compact { max-height: 32px; }
 
 /* Cards */
 .card {
@@ -658,26 +648,26 @@ html, body {
 }
 .osc-readout-value.active { color: var(--accent); }
 
-/* Device panel */
+/* Device panel — compact form now that the right column also holds the
+   connection + manual cards. */
 .device-stage {
-  flex: 1;
   display: grid;
   place-items: center;
   position: relative;
-  padding: 24px 24px 0;
+  padding: 6px 8px 2px;
   min-height: 0;
 }
 .device-svg {
   width: 100%;
-  max-width: 380px;
+  max-width: 240px;
   height: auto;
-  filter: drop-shadow(0 30px 60px rgba(0,0,0,0.4));
+  filter: drop-shadow(0 22px 44px rgba(0,0,0,0.35));
 }
 .device-info {
-  padding: 0 28px 26px;
+  padding: 4px 6px 8px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 .mode-display {
   display: flex;
@@ -686,7 +676,7 @@ html, body {
   gap: 16px;
 }
 .mode-text {
-  font-size: 38px;
+  font-size: 30px;
   font-weight: 600;
   letter-spacing: -0.025em;
   line-height: 1;
@@ -709,38 +699,16 @@ html, body {
   padding-top: 12px;
 }
 
-/* Log */
-.log-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-2);
-}
-.log-tabs {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  height: 32px;
-}
-.log-tab {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  cursor: pointer;
-}
-.log-tab.active { color: var(--text); }
-.log-actions { display: flex; gap: 6px; align-items: center; }
+/* Log — now lives inside a collapsible card in the left column. */
 .log-body {
   overflow-y: auto;
-  padding: 8px 16px 12px;
+  padding: 8px 14px 14px;
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
   min-height: 0;
+  max-height: 50vh;
+  border-top: 1px solid var(--border);
 }
 .log-line {
   display: grid;
@@ -774,41 +742,14 @@ html, body {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
-/* Toolbar (mini status bar at top of device panel) */
-.device-toolbar {
-  position: absolute;
-  top: 14px;
-  left: 14px;
-  right: 14px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  z-index: 2;
-}
-.device-toolbar-left, .device-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.mini-stat {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-muted);
-  background: color-mix(in oklab, var(--bg) 70%, transparent);
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-  border-radius: 6px;
-  backdrop-filter: blur(8px);
-}
-
-/* Card densitiy modifiers */
+/* Card density modifiers */
 .card.flush .card-body { padding-top: 4px; }
 
 @media (max-width: 1100px) {
   .main {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr auto;
-    grid-template-areas: "device" "controls" "log";
+    grid-template-rows: auto 1fr;
+    grid-template-areas: "device" "controls";
   }
-  .device-panel { border-left: none; border-bottom: 1px solid var(--border); max-height: 460px; }
+  .device-panel { border-left: none; border-bottom: 1px solid var(--border); }
 }
