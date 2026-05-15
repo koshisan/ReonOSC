@@ -56,10 +56,27 @@ public sealed class ControlService : IAsyncDisposable
         // Plug the PFSignal reader directly into the resolver: every time the
         // decoded thermal state changes (e.g. user walks into a heat zone),
         // we trigger a reconcile and the next target picks PF over OSC.
+        //
+        // Temporal smoothing: require the same decoded state across N
+        // consecutive samples before propagating it. At ~25 Hz, N=3 is
+        // ~120 ms — well below the perceptual threshold for thermal change
+        // but above the typical single-frame jitter window from MSAA /
+        // supersampling / lens-distortion sub-pixel shifts. Without this
+        // the level was flipping mid-frame on edge motion in VR.
         PfSignal.SignalChanged += (_, sample) =>
         {
             var next = PfSignalDecoder.Decode(sample);
-            if (next != _pfState)
+            if (next == _pfCandidate)
+            {
+                _pfCandidateCount++;
+            }
+            else
+            {
+                _pfCandidate = next;
+                _pfCandidateCount = 1;
+            }
+
+            if (_pfCandidateCount >= PfStabilityFrames && next != _pfState)
             {
                 _pfState = next;
                 _ = ReconcileAsync();
@@ -68,6 +85,9 @@ public sealed class ControlService : IAsyncDisposable
     }
 
     private PfThermalState _pfState = PfThermalState.Off;
+    private PfThermalState _pfCandidate = PfThermalState.Off;
+    private int _pfCandidateCount;
+    private const int PfStabilityFrames = 3;
 
     public async ValueTask DisposeAsync()
     {

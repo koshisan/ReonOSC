@@ -45,6 +45,7 @@ public sealed class PfSignalReader : IDisposable
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
     private PfSignalSample _last = PfSignalSample.None;
+    private Format _loggedSrcFormat = Format.Unknown; // log mirror texture format once per session/reconnect
 
     public void Start()
     {
@@ -153,6 +154,12 @@ public sealed class PfSignalReader : IDisposable
             EnsureStaging(desc);
             _context.CopyResource(_staging!, src);
 
+            if (_loggedSrcFormat != desc.Format)
+            {
+                _loggedSrcFormat = desc.Format;
+                Logf($"PF mirror format: {desc.Format} {desc.Width}x{desc.Height}");
+            }
+
             var map = _context.Map(_staging!, 0, MapMode.Read);
             try { sample = AveragePixel(map, desc.Format, sx, sy); return true; }
             finally { _context.Unmap(_staging!, 0); }
@@ -227,20 +234,26 @@ public sealed class PfSignalReader : IDisposable
             if (!PrintWindow(_vrchatHwnd, memDC, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
                 return false;
 
-            long r = 0, g = 0, b = 0;
+            // GDI returns sRGB-encoded bytes (the swap chain stores Unity's
+            // gamma-corrected output). Decode to linear so the average and
+            // the decoder thresholds are in the same space as the FP16 path.
+            double rl = 0, gl = 0, bl = 0;
             int n = 0;
             for (int dy = -SampleRegion / 2; dy < SampleRegion / 2; dy++)
             for (int dx = -SampleRegion / 2; dx < SampleRegion / 2; dx++)
             {
                 uint c = GetPixel(memDC, sx + dx, sy + dy);
                 if (c == 0xFFFFFFFFu) continue; // CLR_INVALID
-                r += (byte)( c        & 0xFF);
-                g += (byte)((c >>  8) & 0xFF);
-                b += (byte)((c >> 16) & 0xFF);
+                rl += SrgbToLinear(((byte)( c        & 0xFF)) / 255.0);
+                gl += SrgbToLinear(((byte)((c >>  8) & 0xFF)) / 255.0);
+                bl += SrgbToLinear(((byte)((c >> 16) & 0xFF)) / 255.0);
                 n++;
             }
             if (n == 0) return false;
-            sample = new PfSignalSample((byte)(r / n), (byte)(g / n), (byte)(b / n));
+            sample = new PfSignalSample(
+                (byte)Math.Clamp(Math.Round(rl / n * 255.0), 0, 255),
+                (byte)Math.Clamp(Math.Round(gl / n * 255.0), 0, 255),
+                (byte)Math.Clamp(Math.Round(bl / n * 255.0), 0, 255));
             return true;
         }
         finally
@@ -433,33 +446,150 @@ public sealed class PfSignalReader : IDisposable
         });
     }
 
+    /// <summary>
+    /// Average the 4x4 sample region into a single RGB triple normalised to
+    /// LINEAR space — so the decoder's thresholds (calibrated against the
+    /// PFSignal materials' linear shader values 0/0.251/0.502/0.753) hold
+    /// regardless of whether the mirror texture is FP16 HDR, sRGB UNORM, or
+    /// straight linear UNORM. Without this, an HDR eye buffer would feed the
+    /// reader the low byte of a half-precision float (garbage that jitters
+    /// every frame) and an sRGB buffer would systematically over-report level
+    /// by one notch.
+    /// </summary>
     private static PfSignalSample AveragePixel(MappedSubresource map, Format format, int sx, int sy)
     {
         int n = SampleRegion * SampleRegion;
-        long r = 0, g = 0, b = 0;
+        double r = 0, g = 0, b = 0;
+
         unsafe
         {
             byte* basePtr = (byte*)map.DataPointer;
             for (int y = 0; y < SampleRegion; y++)
             {
                 byte* row = basePtr + (sy + y) * map.RowPitch;
-                byte* p = row + sx * 4;
                 for (int x = 0; x < SampleRegion; x++)
                 {
-                    byte b0 = p[0], b1 = p[1], b2 = p[2];
-                    if (format == Format.B8G8R8A8_UNorm || format == Format.B8G8R8X8_UNorm)
-                    {
-                        b += b0; g += b1; r += b2;
-                    }
-                    else
-                    {
-                        r += b0; g += b1; b += b2;
-                    }
-                    p += 4;
+                    ReadPixel(row, sx + x, format, out double pr, out double pg, out double pb);
+                    r += pr; g += pg; b += pb;
                 }
             }
         }
-        return new PfSignalSample((byte)(r / n), (byte)(g / n), (byte)(b / n));
+
+        // Now r/g/b are linear 0..1 sums; average and re-encode to byte for
+        // downstream consumers (decoder + GUI hex display).
+        byte rb = (byte)Math.Clamp(Math.Round(r / n * 255.0), 0, 255);
+        byte gb = (byte)Math.Clamp(Math.Round(g / n * 255.0), 0, 255);
+        byte bb = (byte)Math.Clamp(Math.Round(b / n * 255.0), 0, 255);
+        return new PfSignalSample(rb, gb, bb);
+    }
+
+    /// <summary>Read a single pixel from row at column x, decoding whichever
+    /// pixel format the mirror exposes, and return LINEAR floating-point RGB
+    /// in [0, 1]. Falls back to BGRA8 for unrecognised formats so we still
+    /// produce a defined value (rather than crashing) — the decoder is
+    /// tolerant enough that approximate values still classify correctly.</summary>
+    private static unsafe void ReadPixel(byte* row, int x, Format format, out double r, out double g, out double b)
+    {
+        switch (format)
+        {
+            // BGRA / BGRX UNORM — assume sRGB (Linear-space Unity outputs to
+            // a sRGB-typed buffer; the same memory often gets exposed via a
+            // plain UNORM SRV, so we don't see _SRgb on the format).
+            case Format.B8G8R8A8_UNorm:
+            case Format.B8G8R8X8_UNorm:
+            case Format.B8G8R8A8_UNorm_SRgb:
+            case Format.B8G8R8X8_UNorm_SRgb:
+            {
+                byte* p = row + x * 4;
+                r = SrgbToLinear(p[2] / 255.0);
+                g = SrgbToLinear(p[1] / 255.0);
+                b = SrgbToLinear(p[0] / 255.0);
+                return;
+            }
+
+            case Format.R8G8B8A8_UNorm:
+            case Format.R8G8B8A8_UNorm_SRgb:
+            {
+                byte* p = row + x * 4;
+                r = SrgbToLinear(p[0] / 255.0);
+                g = SrgbToLinear(p[1] / 255.0);
+                b = SrgbToLinear(p[2] / 255.0);
+                return;
+            }
+
+            // R16G16B16A16_FLOAT — half-precision linear, common for HDR
+            // eye buffers in VRChat. Read as 4 halves per pixel; no gamma.
+            case Format.R16G16B16A16_Float:
+            {
+                ushort* p = (ushort*)(row + x * 8);
+                r = HalfToFloat(p[0]);
+                g = HalfToFloat(p[1]);
+                b = HalfToFloat(p[2]);
+                return;
+            }
+
+            // R10G10B10A2 UNORM — sometimes used for HDR-lite mirrors.
+            case Format.R10G10B10A2_UNorm:
+            {
+                uint* p = (uint*)(row + x * 4);
+                uint v = *p;
+                r = (v & 0x3FF) / 1023.0;
+                g = ((v >> 10) & 0x3FF) / 1023.0;
+                b = ((v >> 20) & 0x3FF) / 1023.0;
+                return;
+            }
+
+            default:
+            {
+                // Best-effort BGRA fallback. The next pass logs the unknown
+                // format so we know to add explicit support.
+                byte* p = row + x * 4;
+                r = p[2] / 255.0; g = p[1] / 255.0; b = p[0] / 255.0;
+                return;
+            }
+        }
+    }
+
+    /// <summary>IEC 61966-2-1 inverse transfer function. byte → 0..1 sRGB →
+    /// linear 0..1. Hot enough to be inlined by tiered JIT; we call it 16
+    /// times per sample worst-case.</summary>
+    private static double SrgbToLinear(double srgb)
+    {
+        if (srgb <= 0.04045) return srgb / 12.92;
+        return Math.Pow((srgb + 0.055) / 1.055, 2.4);
+    }
+
+    /// <summary>IEEE 754 half-precision (binary16) → float, manual decode so
+    /// we don't pull in System.Half on netstandard targets. Handles subnormals
+    /// and infinity/NaN gracefully (returns 0/clamps).</summary>
+    private static double HalfToFloat(ushort h)
+    {
+        int sign = (h >> 15) & 0x1;
+        int exp  = (h >> 10) & 0x1F;
+        int mant = h & 0x3FF;
+
+        double value;
+        if (exp == 0)
+        {
+            // subnormal: ±2^-14 × mant/1024
+            value = mant == 0 ? 0.0 : Math.Pow(2, -14) * (mant / 1024.0);
+        }
+        else if (exp == 31)
+        {
+            value = mant == 0 ? double.PositiveInfinity : double.NaN;
+        }
+        else
+        {
+            // normalised: (1 + mant/1024) × 2^(exp-15)
+            value = (1.0 + mant / 1024.0) * Math.Pow(2, exp - 15);
+        }
+
+        if (sign != 0) value = -value;
+
+        // For our purposes (color), clamp negative + infinity / NaN into 0..1
+        if (double.IsNaN(value) || value < 0) return 0;
+        if (value > 1) return 1; // PFSignal pixel is always 0..1 anyway
+        return value;
     }
 
     private void Cleanup()
