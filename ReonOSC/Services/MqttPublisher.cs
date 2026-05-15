@@ -27,6 +27,12 @@ public sealed class MqttPublisher : IAsyncDisposable
 
     private readonly ControlService _service;
     private Settings _settings;
+    // Snapshot of the connection-relevant fields at the time we last
+    // (re)started — ApplySettings compares against this rather than against
+    // the live _settings reference, because callers mutate that reference in
+    // place before handing it back to us. Comparing the live object to
+    // itself would always look unchanged.
+    private (bool enabled, string host, int port, string user, string pw, string baseTopic, string discovery) _liveSnapshot;
     private IMqttClient? _client;
     // Lazy-init: don't touch the MQTTnet types until we actually try to
     // connect, so a broken/missing MQTTnet.dll on the host machine can't
@@ -81,17 +87,9 @@ public sealed class MqttPublisher : IAsyncDisposable
 
     public void ApplySettings(Settings settings)
     {
-        bool restart =
-            settings.MqttEnabled != _settings.MqttEnabled
-            || settings.MqttHost != _settings.MqttHost
-            || settings.MqttPort != _settings.MqttPort
-            || settings.MqttUsername != _settings.MqttUsername
-            || settings.MqttPassword != _settings.MqttPassword
-            || settings.MqttBaseTopic != _settings.MqttBaseTopic
-            || settings.MqttDiscoveryPrefix != _settings.MqttDiscoveryPrefix;
-
         _settings = settings;
-        if (restart)
+        var next = SnapshotOf(settings);
+        if (!next.Equals(_liveSnapshot))
         {
             _ = RestartAsync();
         }
@@ -99,9 +97,14 @@ public sealed class MqttPublisher : IAsyncDisposable
 
     public Task StartAsync() => RestartAsync();
 
+    private static (bool, string, int, string, string, string, string) SnapshotOf(Settings s) =>
+        (s.MqttEnabled, s.MqttHost ?? "", s.MqttPort, s.MqttUsername ?? "",
+         s.MqttPassword ?? "", s.MqttBaseTopic ?? "", s.MqttDiscoveryPrefix ?? "");
+
     private async Task RestartAsync()
     {
         await StopInternalAsync().ConfigureAwait(false);
+        _liveSnapshot = SnapshotOf(_settings);
 
         if (!_settings.MqttEnabled || string.IsNullOrWhiteSpace(_settings.MqttHost))
         {
