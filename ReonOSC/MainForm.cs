@@ -17,11 +17,11 @@ public sealed class MainForm : Form
     private readonly ControlService _service;
     private readonly Settings _settings;
     private readonly StatusIcons _icons;
-    private readonly MqttPublisher _mqtt;
+    private readonly MqttPublisher? _mqtt;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     private WebViewBridge? _bridge;
 
-    public MainForm(ControlService service, Settings settings, StatusIcons icons, MqttPublisher mqtt)
+    public MainForm(ControlService service, Settings settings, StatusIcons icons, MqttPublisher? mqtt)
     {
         _service = service;
         _settings = settings;

@@ -13,7 +13,7 @@ public sealed class TrayContext : ApplicationContext
 {
     private readonly Settings _settings;
     private readonly ControlService _service;
-    private readonly MqttPublisher _mqtt;
+    private readonly MqttPublisher? _mqtt;
     private readonly MainForm _form;
     private readonly NotifyIcon _tray;
     private readonly StatusIcons _icons = new();
@@ -22,7 +22,11 @@ public sealed class TrayContext : ApplicationContext
     {
         _settings = Settings.Load();
         _service = new ControlService(_settings);
-        _mqtt = new MqttPublisher(_service, _settings);
+        // Construct MQTT defensively: a broken MQTTnet load on a host without
+        // the DLL alongside the exe must NOT prevent the tray icon from coming
+        // up. The bridge tolerates a null publisher.
+        try { _mqtt = new MqttPublisher(_service, _settings); }
+        catch (Exception ex) { Console.Error.WriteLine($"MQTT init failed: {ex.Message}"); _mqtt = null; }
         _form = new MainForm(_service, _settings, _icons, _mqtt);
 
         var menu = new ContextMenuStrip();
@@ -84,7 +88,11 @@ public sealed class TrayContext : ApplicationContext
         }
         // MQTT publisher autostarts only when the user has configured a broker
         // and toggled it on. Failures land in the GUI log via the bridge.
-        _ = _mqtt.StartAsync();
+        if (_mqtt is not null)
+        {
+            try { _ = _mqtt.StartAsync(); }
+            catch (Exception ex) { Console.Error.WriteLine($"MQTT start failed: {ex.Message}"); }
+        }
 
         if (!_settings.StartMinimised)
             ShowForm();
@@ -109,7 +117,7 @@ public sealed class TrayContext : ApplicationContext
             _tray.Dispose();
         }
         catch { }
-        try { _ = _mqtt.DisposeAsync(); } catch { }
+        try { if (_mqtt is not null) _ = _mqtt.DisposeAsync(); } catch { }
         try { _ = _service.DisposeAsync(); } catch { }
         try { _icons.Dispose(); } catch { }
         base.ExitThreadCore();

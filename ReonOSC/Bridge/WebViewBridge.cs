@@ -24,7 +24,7 @@ public sealed class WebViewBridge : IDisposable
 
     private readonly WebView2 _web;
     private readonly ControlService _service;
-    private readonly MqttPublisher _mqtt;
+    private readonly MqttPublisher? _mqtt;
     private readonly System.Threading.SynchronizationContext? _uiCtx;
     private Settings _settings;
     private DateTime? _connectedAt;
@@ -33,7 +33,7 @@ public sealed class WebViewBridge : IDisposable
     private long _lastPushedPacketCount = -1;
     private string _lastPfHex = "#000000";
 
-    public WebViewBridge(WebView2 web, ControlService service, Settings settings, MqttPublisher mqtt)
+    public WebViewBridge(WebView2 web, ControlService service, Settings settings, MqttPublisher? mqtt)
     {
         _web = web;
         _service = service;
@@ -70,8 +70,11 @@ public sealed class WebViewBridge : IDisposable
         // which would flood the log. The live swatch in the GUI is the
         // observation surface.
 
-        _mqtt.Log += (_, msg) => Push("log.line", new { t = Ts(), kind = ClassifyLog(msg), msg });
-        _mqtt.StateChanged += (_, _) => PushMqttState();
+        if (_mqtt is not null)
+        {
+            _mqtt.Log += (_, msg) => Push("log.line", new { t = Ts(), kind = ClassifyLog(msg), msg });
+            _mqtt.StateChanged += (_, _) => PushMqttState();
+        }
 
         // Poll the OSC packet counter every 500 ms and push osc.state when it
         // changes, so the UI can show a live 'X packets' counter without per-
@@ -496,6 +499,12 @@ public sealed class WebViewBridge : IDisposable
     private void SetMqtt(JsonElement payload)
     {
         if (payload.ValueKind != JsonValueKind.Object) return;
+        if (_mqtt is null)
+        {
+            Push("log.line", new { t = Ts(), kind = "err",
+                msg = "MQTT publisher unavailable (init failed at startup — see exe directory for MQTTnet.dll)" });
+            return;
+        }
 
         if (payload.TryGetProperty("enabled", out var en) && (en.ValueKind is JsonValueKind.True or JsonValueKind.False))
             _settings.MqttEnabled = en.GetBoolean();
@@ -522,11 +531,18 @@ public sealed class WebViewBridge : IDisposable
     }
 
     private void PushMqttState()
-        => Push("mqtt.state", new
+    {
+        if (_mqtt is null)
+        {
+            Push("mqtt.state", new { state = "Unavailable", error = (string?)"MQTTnet failed to load" });
+            return;
+        }
+        Push("mqtt.state", new
         {
             state = _mqtt.CurrentState.ToString(),
             error = _mqtt.LastError,
         });
+    }
 
     private void SetOptions(JsonElement payload)
     {

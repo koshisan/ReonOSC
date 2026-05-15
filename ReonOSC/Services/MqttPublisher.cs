@@ -28,7 +28,10 @@ public sealed class MqttPublisher : IAsyncDisposable
     private readonly ControlService _service;
     private Settings _settings;
     private IMqttClient? _client;
-    private readonly MqttFactory _factory = new();
+    // Lazy-init: don't touch the MQTTnet types until we actually try to
+    // connect, so a broken/missing MQTTnet.dll on the host machine can't
+    // tank the app's startup (which used to deny a tray icon entirely).
+    private MqttFactory? _factory;
     private CancellationTokenSource? _loopCts;
     private Task? _loop;
     private readonly SemaphoreSlim _publishLock = new(1, 1);
@@ -53,12 +56,22 @@ public sealed class MqttPublisher : IAsyncDisposable
         _service = service;
         _settings = settings;
 
-        _service.CommandSent += (_, _) => _ = PublishStateAsync();
-        _service.Reon.TelemetryReceived += (_, t) =>
+        // Defensive subscribes: ControlService is unconditionally created,
+        // so these should always succeed — but wrapping keeps a broken event
+        // wiring from killing the host before the tray icon is up.
+        try
         {
-            _lastTelemetry = t;
-            _ = PublishStateAsync();
-        };
+            _service.CommandSent += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.Reon.TelemetryReceived += (_, t) =>
+            {
+                _lastTelemetry = t;
+                try { _ = PublishStateAsync(); } catch { }
+            };
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke(this, $"MQTT publisher init warning: {ex.Message}");
+        }
     }
 
     public void ApplySettings(Settings settings)
@@ -130,6 +143,7 @@ public sealed class MqttPublisher : IAsyncDisposable
             try
             {
                 SetState(State.Connecting, null);
+                _factory ??= new MqttFactory();
                 _client = _factory.CreateMqttClient();
 
                 var optsBuilder = new MqttClientOptionsBuilder()
