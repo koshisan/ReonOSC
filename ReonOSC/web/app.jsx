@@ -830,7 +830,7 @@ function App() {
               })}
             </div>
 
-            {showSparkline && hasTemps && (
+            {showSparkline && (
               <Sparkline data={plateHistory} color={accent}/>
             )}
 
