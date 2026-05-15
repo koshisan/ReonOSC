@@ -818,18 +818,14 @@ public sealed class PfSignalReader : IDisposable
         return Orientation.Unknown;
     }
 
-    /// <summary>Edge-trigger log on finder visibility transitions so the
-    /// user knows why the level might not be updating, but without spamming
-    /// the log on every frame. Args are the two candidate-position samples;
-    /// when transitioning to a visible state we report which of them was
-    /// black and which was white so a glance at the log explains the
-    /// orientation auto-detect's choice.</summary>
+    /// <summary>Track finder visibility for internal use. We used to log on
+    /// every transition, but in practice the quad bobs in and out of the FOV
+    /// constantly during normal head motion and that flooded the log. State
+    /// is still tracked (still surfaced via LastFinderTop/Bottom and the
+    /// Capture diagnostic) — just silent.</summary>
     private void NoteFinderState(bool valid, PfSignalSample atTop, PfSignalSample atBot)
     {
-        if (valid == _lastFinderState) return;
         _lastFinderState = valid;
-        if (valid) Logf($"PF: finders detected — y0.03={atTop} y0.97={atBot}");
-        else       Logf($"PF: finders lost — y0.03={atTop} y0.97={atBot}. Level held until lock returns.");
     }
 
     /// <summary>
