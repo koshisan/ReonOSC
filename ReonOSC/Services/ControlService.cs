@@ -26,12 +26,21 @@ public sealed class ControlService : IAsyncDisposable
     /// <summary>Which input source authored the last sent command — used by the
     /// GUI's SOURCE indicator. One of "Manual", "PF", "OSC".</summary>
     public string LastCommandSource { get; private set; } = "OSC";
+    /// <summary>Granular trigger string — distinguishes which specific input
+    /// fired ("OSC:PFHotHigh", "OSC:water", "PFSignal", "Manual", "Idle"). Used
+    /// by the MQTT publisher so HA automations can tell e.g. an avatar caress
+    /// (OSC:PFHotHigh — transient) from sitting at a fire (PFSignal — durable).</summary>
+    public string LastCommandReason { get; private set; } = "Idle";
 
     public event EventHandler<ResolvedCommand>? CommandSent;
     public event EventHandler<string>? Log;
     /// <summary>Fires whenever any OSC input value changes. Snapshot keys match
     /// the GUI contract: "PFHotHigh", "water", "cold", "heat".</summary>
     public event EventHandler<IReadOnlyDictionary<string, float>>? InputsChanged;
+    /// <summary>Fires when (cmd, source, reason) changes — regardless of
+    /// whether a BLE write actually happened. MQTT consumers listen here so
+    /// they can publish reason changes even when no Reon is connected.</summary>
+    public event EventHandler<(ResolvedCommand cmd, string source, string reason)>? StateChanged;
 
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly TimeSpan _minWriteGap = TimeSpan.FromMilliseconds(120);
@@ -206,9 +215,9 @@ public sealed class ControlService : IAsyncDisposable
     /// PF levels (1..4) are clamped to the connected device's per-direction
     /// max (e.g. CoolFastHigh → Cool L3 on an RNP-3 which caps cool at 3).
     /// </summary>
-    private (ResolvedCommand cmd, string source) ResolveTarget()
+    private (ResolvedCommand cmd, string source, string reason) ResolveTarget()
     {
-        if (ManualOverride) return (ManualCommand, "Manual");
+        if (ManualOverride) return (ManualCommand, "Manual", "Manual");
 
         if (_pfState.Mode != PfThermalMode.Off)
         {
@@ -216,19 +225,49 @@ public sealed class ControlService : IAsyncDisposable
             var caps = Reon.Capabilities;
             var max  = mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
             int level = Math.Clamp(_pfState.Level, 0, max);
-            return (new ResolvedCommand(mode, level), "PF");
+            return (new ResolvedCommand(mode, level), "PF", "PFSignal");
         }
 
-        return (ControlResolver.Resolve(_inputs, Settings), "OSC");
+        var (cmd, oscReason) = ControlResolver.Resolve(_inputs, Settings);
+        return (cmd, "OSC", oscReason);
     }
 
-    /// <summary>Resolve the current target and push it to the device if it differs from the last sent.</summary>
+    /// <summary>Resolve the current target and push it to the device if it
+    /// differs from the last sent. Also fires <see cref="StateChanged"/>
+    /// whenever (cmd, source, reason) shifts — regardless of whether a BLE
+    /// write happened — so MQTT can publish reason changes even when the
+    /// device isn't connected.</summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
     {
-        if (!Reon.IsConnected) return;
+        var (target, source, reason) = ResolveTarget();
 
-        var (target, source) = ResolveTarget();
-        if (target == LastSentCommand && source == LastCommandSource) return;
+        // Reason-only changes update the property and fire StateChanged even
+        // when the device is disconnected or the BLE write would be a no-op.
+        bool stateShifted = target != LastSentCommand
+                         || source != LastCommandSource
+                         || reason != LastCommandReason;
+
+        if (!Reon.IsConnected)
+        {
+            if (stateShifted)
+            {
+                LastCommandReason = reason;
+                // Note: we deliberately do NOT update LastSentCommand/Source
+                // here — those track what the device actually received.
+                StateChanged?.Invoke(this, (target, source, reason));
+            }
+            return;
+        }
+
+        if (target == LastSentCommand && source == LastCommandSource)
+        {
+            if (reason != LastCommandReason)
+            {
+                LastCommandReason = reason;
+                StateChanged?.Invoke(this, (target, source, reason));
+            }
+            return;
+        }
 
         if (!await _writeLock.WaitAsync(0, ct).ConfigureAwait(false)) return;
         try
@@ -239,8 +278,16 @@ public sealed class ControlService : IAsyncDisposable
                 await Task.Delay(_minWriteGap - elapsed, ct).ConfigureAwait(false);
 
             // re-evaluate after the wait so we don't send a stale target
-            (target, source) = ResolveTarget();
-            if (target == LastSentCommand && source == LastCommandSource) return;
+            (target, source, reason) = ResolveTarget();
+            if (target == LastSentCommand && source == LastCommandSource)
+            {
+                if (reason != LastCommandReason)
+                {
+                    LastCommandReason = reason;
+                    StateChanged?.Invoke(this, (target, source, reason));
+                }
+                return;
+            }
 
             try
             {
@@ -253,7 +300,9 @@ public sealed class ControlService : IAsyncDisposable
                 LastSentCommand = target;
                 LastSentAt = DateTime.UtcNow;
                 LastCommandSource = source;
+                LastCommandReason = reason;
                 CommandSent?.Invoke(this, target);
+                StateChanged?.Invoke(this, (target, source, reason));
             }
             catch (Exception ex)
             {

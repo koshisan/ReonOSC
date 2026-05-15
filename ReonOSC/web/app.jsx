@@ -252,6 +252,7 @@ function App() {
   const [currentMode, setCurrentMode] = useState("Stop");
   const [currentLevel, setCurrentLevel] = useState(0);
   const [currentSource, setCurrentSource] = useState("OSC");
+  const [currentReason, setCurrentReason] = useState("Idle");
   const [temps, setTemps] = useState({ plate: 0, sink: 0, board: 0, ambient: 0 });
   const [hasTemps, setHasTemps] = useState(false);
 
@@ -334,6 +335,7 @@ function App() {
         setCurrentMode(p.mode);
         setCurrentLevel(p.level);
         if (p.source) setCurrentSource(p.source);
+        if (p.reason) setCurrentReason(p.reason);
       }),
 
       reonBridge.on("telemetry", (p) => {
@@ -958,7 +960,9 @@ function App() {
                 {currentMode}{currentMode !== "Stop" ? ` L${currentLevel}` : ""}
               </span>
               <span className="mode-meta">
-                <div>SOURCE · <strong>{manualOverride ? "Manual" : (currentSource || "OSC")}</strong></div>
+                <div>
+                  TRIGGER · <strong>{manualOverride ? "Manual" : (currentReason || currentSource || "Idle")}</strong>
+                </div>
                 <div style={{marginTop: 2}}>UPTIME · <strong>{fmtUptime(uptime)}</strong></div>
               </span>
             </div>

@@ -30,54 +30,66 @@ public readonly record struct ResolvedCommand(Ble.ReonProtocol.Mode Mode, int Le
 /// <summary>
 /// Resolves the four OSC inputs plus configured preset levels into a single
 /// (mode, level) the device should be in. Pure function of state — no I/O.
+///
+/// The companion 'reason' string identifies the specific trigger so HA can
+/// automate against it — e.g. "OSC:PFHotHigh" (avatar caress, ignore) vs
+/// "PFSignal" (in a world heat zone, do crank the heating). The reason is
+/// not part of <see cref="ResolvedCommand"/> because mode/level equality
+/// must continue to gate BLE writes; reason changes only feed telemetry.
 /// </summary>
 public static class ControlResolver
 {
-    public static ResolvedCommand Resolve(OscInputs inputs, Settings settings)
+    public static (ResolvedCommand cmd, string reason) Resolve(OscInputs inputs, Settings settings)
     {
         // Heat candidates: PfHotHigh (gives configured Heat-Touch level when "on") and the heat float (mapped).
         int heatLevel = 0;
         DateTime heatTs = DateTime.MinValue;
+        string? heatReason = null;
 
         if (inputs.Get(InputSource.PfHotHigh) >= 0.5f)
         {
-            heatLevel = Math.Max(heatLevel, ClampLevel(settings.HeatTouchLevel));
+            var lvl = ClampLevel(settings.HeatTouchLevel);
+            if (lvl > heatLevel) { heatLevel = lvl; heatReason = "OSC:PFHotHigh"; }
             heatTs = Latest(heatTs, inputs.GetChangedAt(InputSource.PfHotHigh));
         }
         var heatFromFloat = FloatToLevel(inputs.Get(InputSource.Heat));
         if (heatFromFloat is { } hl)
         {
-            heatLevel = Math.Max(heatLevel, hl);
+            if (hl > heatLevel) { heatLevel = hl; heatReason = "OSC:heat"; }
             heatTs = Latest(heatTs, inputs.GetChangedAt(InputSource.Heat));
         }
 
         // Cool candidates
         int coolLevel = 0;
         DateTime coolTs = DateTime.MinValue;
+        string? coolReason = null;
 
         if (inputs.Get(InputSource.Water) >= 0.5f)
         {
-            coolLevel = Math.Max(coolLevel, ClampLevel(settings.ColdWaterLevel));
+            var lvl = ClampLevel(settings.ColdWaterLevel);
+            if (lvl > coolLevel) { coolLevel = lvl; coolReason = "OSC:water"; }
             coolTs = Latest(coolTs, inputs.GetChangedAt(InputSource.Water));
         }
         var coolFromFloat = FloatToLevel(inputs.Get(InputSource.Cold));
         if (coolFromFloat is { } cl)
         {
-            coolLevel = Math.Max(coolLevel, cl);
+            if (cl > coolLevel) { coolLevel = cl; coolReason = "OSC:cold"; }
             coolTs = Latest(coolTs, inputs.GetChangedAt(InputSource.Cold));
         }
 
         if (heatLevel == 0 && coolLevel == 0)
-            return ResolvedCommand.Stop;
+            return (ResolvedCommand.Stop, "Idle");
 
         if (heatLevel > 0 && coolLevel > 0)
+        {
             return heatTs >= coolTs
-                ? new ResolvedCommand(Ble.ReonProtocol.Mode.Heat, heatLevel)
-                : new ResolvedCommand(Ble.ReonProtocol.Mode.Cool, coolLevel);
+                ? (new ResolvedCommand(Ble.ReonProtocol.Mode.Heat, heatLevel), heatReason ?? "OSC")
+                : (new ResolvedCommand(Ble.ReonProtocol.Mode.Cool, coolLevel), coolReason ?? "OSC");
+        }
 
         return heatLevel > 0
-            ? new ResolvedCommand(Ble.ReonProtocol.Mode.Heat, heatLevel)
-            : new ResolvedCommand(Ble.ReonProtocol.Mode.Cool, coolLevel);
+            ? (new ResolvedCommand(Ble.ReonProtocol.Mode.Heat, heatLevel), heatReason ?? "OSC")
+            : (new ResolvedCommand(Ble.ReonProtocol.Mode.Cool, coolLevel), coolReason ?? "OSC");
     }
 
     /// <summary>

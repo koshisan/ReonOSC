@@ -62,6 +62,11 @@ public sealed class MqttPublisher : IAsyncDisposable
         try
         {
             _service.CommandSent += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            // StateChanged catches reason-only shifts (and disconnected updates)
+            // that CommandSent doesn't fire on. Without this, an avatar caress
+            // (OSC:PFHotHigh) right after a fire (PFSignal) wouldn't update the
+            // reason topic if both happened to resolve to the same Heat L3.
+            _service.StateChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
             _service.Reon.TelemetryReceived += (_, t) =>
             {
                 _lastTelemetry = t;
@@ -228,6 +233,7 @@ public sealed class MqttPublisher : IAsyncDisposable
             mode,
             level = cmd.Level,
             source = _service.LastCommandSource,
+            reason = _service.LastCommandReason,
             connected = _service.Reon.IsConnected,
             model = _service.Reon.Model,
             caps = new
@@ -290,6 +296,21 @@ public sealed class MqttPublisher : IAsyncDisposable
             state_topic = stateTopic,
             value_template = "{{ value_json.source }}",
             icon = "mdi:source-branch",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        // Reason — the granular trigger. Distinguishes e.g. "OSC:PFHotHigh"
+        // (avatar caress, transient) from "PFSignal" (sitting in a world
+        // heat zone, durable) — automations key off this to decide whether
+        // to drive the room AC alongside the wearable.
+        await PublishDiscoveryEntityAsync("sensor", "reason", new
+        {
+            name = "Reon trigger reason",
+            unique_id = "reonosc_reason",
+            state_topic = stateTopic,
+            value_template = "{{ value_json.reason }}",
+            icon = "mdi:label-outline",
             availability_topic = availabilityTopic,
             device,
         }).ConfigureAwait(false);

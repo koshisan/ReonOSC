@@ -44,7 +44,26 @@ public sealed class WebViewBridge : IDisposable
         _web.CoreWebView2.WebMessageReceived += OnWebMessage;
 
         _service.Log += (_, msg) => Push("log.line", new { t = Ts(), kind = ClassifyLog(msg), msg });
-        _service.CommandSent += (_, cmd) => PushCurrent(cmd, _service.LastCommandSource);
+        _service.CommandSent += (_, cmd) => PushCurrent(cmd, _service.LastCommandSource, _service.LastCommandReason);
+        // Reason-only updates: when the trigger changes but the wire command
+        // stays the same (e.g. PFSignal → OSC:PFHotHigh both resolving to
+        // Heat L3), CommandSent doesn't fire. StateChanged catches it so the
+        // GUI's SOURCE/reason indicator stays honest.
+        _service.StateChanged += (_, s) =>
+        {
+            Push("state.current", new
+            {
+                mode = s.cmd.Mode switch
+                {
+                    ReonProtocol.Mode.Cool => "Cool",
+                    ReonProtocol.Mode.Heat => "Heat",
+                    _ => "Stop",
+                },
+                level = s.cmd.Level,
+                source = s.source,
+                reason = s.reason,
+            });
+        };
         _service.Reon.TelemetryReceived += (_, t) => Push("telemetry", new
         {
             plate = t.SkinPlate, sink = t.Heatsink, board = t.Board, ambient = t.Ambient,
@@ -227,7 +246,7 @@ public sealed class WebViewBridge : IDisposable
             },
         });
         if (_service.LastSentCommand.Mode != ReonProtocol.Mode.Stop)
-            PushCurrent(_service.LastSentCommand, _service.LastCommandSource);
+            PushCurrent(_service.LastSentCommand, _service.LastCommandSource, _service.LastCommandReason);
 
         // Push the current OSC inputs once so the GUI has a baseline reading.
         PushInputs(_service.Snapshot());
@@ -580,7 +599,7 @@ public sealed class WebViewBridge : IDisposable
             packets = _service.OscPacketsReceived,
         });
 
-    private void PushCurrent(ResolvedCommand cmd, string source)
+    private void PushCurrent(ResolvedCommand cmd, string source, string reason)
     {
         var modeStr = cmd.Mode switch
         {
@@ -588,7 +607,7 @@ public sealed class WebViewBridge : IDisposable
             ReonProtocol.Mode.Heat => "Heat",
             _ => "Stop",
         };
-        Push("state.current", new { mode = modeStr, level = cmd.Level, source });
+        Push("state.current", new { mode = modeStr, level = cmd.Level, source, reason });
         var kind = modeStr.ToLowerInvariant();
         var line = modeStr == "Stop" ? "→ Stop" : $"→ {modeStr} L{cmd.Level}";
         Push("log.line", new { t = Ts(), kind, msg = line });
