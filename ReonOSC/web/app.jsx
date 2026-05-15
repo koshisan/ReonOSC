@@ -709,11 +709,8 @@ function App() {
                         <button
                           className="btn ghost"
                           style={{padding: "3px 10px", fontSize: 11.5}}
-                          onClick={() => {
-                            const label = window.prompt("Snapshot label (optional):", "") ?? "";
-                            send("pfSignal.capture", { label });
-                          }}
-                          title="Snapshot the current pixel value into the log with an optional label"
+                          onClick={() => send("pfSignal.capture", null)}
+                          title="Save a full-frame screenshot with sample-position overlays to C:\\temp\\reon-pfcapture-*.png"
                         >
                           Capture
                         </button>

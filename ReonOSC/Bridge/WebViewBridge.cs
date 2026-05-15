@@ -487,17 +487,24 @@ public sealed class WebViewBridge : IDisposable
             Push("log.line", new { t = Ts(), kind = "err", msg = "PF capture: hook is not running" });
             return;
         }
-        var label = payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("label", out var l)
-                    ? l.GetString() : null;
-        var prefix = string.IsNullOrWhiteSpace(label) ? "PF capture" : $"PF capture [{label!.Trim()}]";
-        // Dump the full sampling state so an instability report shows exactly
-        // what the reader sees — the two candidate finder positions, the
-        // signal pixel, the auto-detected orientation, and the backend. This
-        // is what we'd want in a bug report.
+        // Persist the active backend's current frame to C:\temp so the user
+        // can see exactly where the reader thinks the PFSignal pixels are.
+        // Red boxes mark the finder candidate positions, green ones the
+        // signal pixel candidates. Crucially: no text prompt — the original
+        // window.prompt() was unusable in VR. The label payload field is
+        // now ignored.
+        var path = _service.PfSignal.CaptureToFile(@"C:\temp");
         var top = _service.PfSignal.LastFinderTop;
         var bot = _service.PfSignal.LastFinderBottom;
-        Push("log.line", new { t = Ts(), kind = "info", msg =
-            $"{prefix}: signal={_lastPfHex} y0.03={top} y0.97={bot} orient={_service.PfSignal.LastOrientation} backend={_service.PfSignal.ActiveBackend}" });
+        var summary = $"signal={_lastPfHex} y0.03={top} y0.97={bot} orient={_service.PfSignal.LastOrientation} backend={_service.PfSignal.ActiveBackend}";
+        if (path is null)
+        {
+            Push("log.line", new { t = Ts(), kind = "err", msg = $"PF capture: write failed. {summary}" });
+        }
+        else
+        {
+            Push("log.line", new { t = Ts(), kind = "info", msg = $"PF capture saved → {path}  ({summary})" });
+        }
     }
 
     private void TogglePfHook(JsonElement payload)

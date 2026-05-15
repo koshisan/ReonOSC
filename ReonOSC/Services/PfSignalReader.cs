@@ -1,3 +1,6 @@
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using SharpGen.Runtime;
@@ -528,6 +531,188 @@ public sealed class PfSignalReader : IDisposable
     {
         _last = sample;
         SignalChanged?.Invoke(this, sample);
+    }
+
+    // -------- diagnostic full-frame capture ---------------------------------
+
+    /// <summary>
+    /// Dump the active backend's current frame to a PNG and overlay the three
+    /// sample positions we'd read (black-finder candidate, white-finder
+    /// candidate, signal pixel). Returns the file path on success, null
+    /// otherwise. Used by the GUI's Capture button so the user can confirm
+    /// where the reader thinks the PFSignal pixels live — particularly
+    /// valuable when debugging "the level changes when I look around"
+    /// reports in VR, where any text-prompt UI is unusable.
+    /// </summary>
+    public string? CaptureToFile(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+            var path = Path.Combine(dir, $"reon-pfcapture-{stamp}.png");
+
+            switch (ActiveBackend)
+            {
+                case CaptureBackend.OpenVrMirror: return CaptureOpenVrToFile(path);
+                case CaptureBackend.WindowCapture: return CaptureWindowToFile(path);
+                default: return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logf($"PF capture-to-file failed: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private string? CaptureOpenVrToFile(string path)
+    {
+        if (_compositor is null || _device is null || _context is null) return null;
+
+        IntPtr srvPtr = IntPtr.Zero;
+        var err = _compositor.GetMirrorTextureD3D11(EVREye.Eye_Left, _device.NativePointer, ref srvPtr);
+        if (err != EVRCompositorError.None || srvPtr == IntPtr.Zero) return null;
+
+        try
+        {
+            var iidSrv = typeof(ID3D11ShaderResourceView).GUID;
+            int hr = Marshal.QueryInterface(srvPtr, ref iidSrv, out var srvOwned);
+            if (hr != 0 || srvOwned == IntPtr.Zero) return null;
+
+            using var srv = new ID3D11ShaderResourceView(srvOwned);
+            using var resource = srv.Resource;
+            using var src = resource.QueryInterface<ID3D11Texture2D>();
+            var desc = src.Description;
+            if (desc.Width == 0 || desc.Height == 0) return null;
+
+            EnsureStaging(desc);
+            _context.CopyResource(_staging!, src);
+            int w = (int)desc.Width, h = (int)desc.Height;
+
+            var map = _context.Map(_staging!, 0, MapMode.Read);
+            try
+            {
+                using var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                WriteMappedToBitmap(map, desc.Format, w, h, bmp);
+                OverlaySamplePositions(bmp);
+                bmp.Save(path, ImageFormat.Png);
+            }
+            finally { _context.Unmap(_staging!, 0); }
+            return path;
+        }
+        finally
+        {
+            _compositor.ReleaseMirrorTextureD3D11(srvPtr);
+        }
+    }
+
+    private string? CaptureWindowToFile(string path)
+    {
+        if (_vrchatHwnd == IntPtr.Zero || !IsWindow(_vrchatHwnd)) return null;
+        if (!GetClientRect(_vrchatHwnd, out var rect)) return null;
+        int w = rect.Right - rect.Left;
+        int h = rect.Bottom - rect.Top;
+        if (w <= 0 || h <= 0) return null;
+
+        IntPtr windowDC = GetWindowDC(_vrchatHwnd);
+        if (windowDC == IntPtr.Zero) return null;
+        IntPtr memDC = IntPtr.Zero;
+        IntPtr hbitmap = IntPtr.Zero;
+        IntPtr oldBitmap = IntPtr.Zero;
+        try
+        {
+            memDC = CreateCompatibleDC(windowDC);
+            if (memDC == IntPtr.Zero) return null;
+            hbitmap = CreateCompatibleBitmap(windowDC, w, h);
+            if (hbitmap == IntPtr.Zero) return null;
+            oldBitmap = SelectObject(memDC, hbitmap);
+
+            if (!PrintWindow(_vrchatHwnd, memDC, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
+                return null;
+
+            using (var bmp = Image.FromHbitmap(hbitmap))
+            using (var clone = new Bitmap(bmp.Width, bmp.Height, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(clone)) g.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
+                OverlaySamplePositions(clone);
+                clone.Save(path, ImageFormat.Png);
+            }
+            return path;
+        }
+        finally
+        {
+            if (oldBitmap != IntPtr.Zero) SelectObject(memDC, oldBitmap);
+            if (hbitmap != IntPtr.Zero) DeleteObject(hbitmap);
+            if (memDC != IntPtr.Zero) DeleteDC(memDC);
+            ReleaseDC(_vrchatHwnd, windowDC);
+        }
+    }
+
+    /// <summary>Convert a mapped staging texture to BGRA32 in a Bitmap,
+    /// applying the same per-format normalisation as the runtime reader so
+    /// the saved image faithfully reflects what we sample. Final image is
+    /// linear-encoded bytes — that's what the decoder operates on.</summary>
+    private static void WriteMappedToBitmap(MappedSubresource map, Format format, int w, int h, Bitmap bmp)
+    {
+        var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            unsafe
+            {
+                byte* src = (byte*)map.DataPointer;
+                byte* dst = (byte*)data.Scan0;
+                int dstStride = data.Stride;
+                for (int y = 0; y < h; y++)
+                {
+                    byte* srow = src + y * map.RowPitch;
+                    byte* drow = dst + y * dstStride;
+                    for (int x = 0; x < w; x++)
+                    {
+                        ReadPixel(srow, x, format, out double r, out double g, out double b);
+                        byte rb = (byte)Math.Clamp(Math.Round(r * 255.0), 0, 255);
+                        byte gb = (byte)Math.Clamp(Math.Round(g * 255.0), 0, 255);
+                        byte bb = (byte)Math.Clamp(Math.Round(b * 255.0), 0, 255);
+                        drow[x * 4 + 0] = bb;
+                        drow[x * 4 + 1] = gb;
+                        drow[x * 4 + 2] = rb;
+                        drow[x * 4 + 3] = 255;
+                    }
+                }
+            }
+        }
+        finally { bmp.UnlockBits(data); }
+    }
+
+    /// <summary>Draw red crosshairs at the three sample positions (both
+    /// finder candidates and the signal pixel). Makes it immediately
+    /// obvious from the saved PNG whether the reader is hitting the
+    /// PFSignal blocks or random scene content.</summary>
+    private static void OverlaySamplePositions(Bitmap bmp)
+    {
+        int w = bmp.Width, h = bmp.Height;
+        using var g = Graphics.FromImage(bmp);
+        using var penFinder = new Pen(Color.FromArgb(255, 255, 80, 80), 2);
+        using var penSignal = new Pen(Color.FromArgb(255, 80, 255, 80), 2);
+        using var font = new Font(FontFamily.GenericSansSerif, 11, FontStyle.Bold);
+        using var brushFinder = new SolidBrush(Color.FromArgb(255, 255, 80, 80));
+        using var brushSignal = new SolidBrush(Color.FromArgb(255, 80, 255, 80));
+
+        void Mark(float fx, float fy, Pen pen, Brush brush, string label)
+        {
+            int cx = (int)(w * fx);
+            int cy = (int)(h * fy);
+            int boxHalf = 12; // generous box so it's visible against scene clutter
+            g.DrawRectangle(pen, cx - boxHalf, cy - boxHalf, boxHalf * 2, boxHalf * 2);
+            g.DrawLine(pen, cx - 24, cy, cx + 24, cy);
+            g.DrawLine(pen, cx, cy - 24, cx, cy + 24);
+            g.DrawString(label, font, brush, cx + 16, cy + 8);
+        }
+
+        Mark(FinderXCenter, FinderTopY, penFinder, brushFinder, "y=0.03 (finder candidate)");
+        Mark(FinderXCenter, FinderBotY, penFinder, brushFinder, "y=0.97 (finder candidate)");
+        Mark(SamplePointX, FinderTopY, penSignal, brushSignal, "signal? y=0.03");
+        Mark(SamplePointX, FinderBotY, penSignal, brushSignal, "signal? y=0.97");
     }
 
     private void EnsureStaging(Texture2DDescription sourceDesc)
