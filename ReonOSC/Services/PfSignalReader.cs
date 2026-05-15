@@ -84,6 +84,12 @@ public sealed class PfSignalReader : IDisposable
     private PfSignalSample _last = PfSignalSample.None;
     private Format _loggedSrcFormat = Format.Unknown; // log mirror texture format once per session/reconnect
     private bool _lastFinderState; // false=invisible/no-lock, true=quad is in view; logged on transitions only
+    private int _captureCounter; // monotonic, incremented per CaptureToFile call so the user can verify each click is unique
+    // D3D11 immediate context is NOT thread-safe. Loop() samples on a thread-
+    // pool thread; CaptureToFile() runs on the bridge / UI thread. Serialising
+    // here keeps CopyResource/Map from racing each other and producing the
+    // stale data the user observed across multiple capture clicks.
+    private readonly object _ctxLock = new();
 
     /// <summary>Latest sample from the candidate finder position at y=0.03.
     /// Surfaced for the Capture diagnostic so the user can see exactly what
@@ -193,46 +199,50 @@ public sealed class PfSignalReader : IDisposable
             var desc = src.Description;
             if (desc.Width == 0 || desc.Height == 0) return SampleResult.NoData;
 
-            EnsureStaging(desc);
-            _context.CopyResource(_staging!, src);
-
-            if (_loggedSrcFormat != desc.Format)
-            {
-                _loggedSrcFormat = desc.Format;
-                Logf($"PF mirror format: {desc.Format} {desc.Width}x{desc.Height}");
-            }
-
             int w = (int)desc.Width, h = (int)desc.Height;
-            var map = _context.Map(_staging!, 0, MapMode.Read);
-            try
+            lock (_ctxLock)
             {
-                // Sample BOTH candidate finder positions; one of them is the
-                // black block, the other is the white block (orientation
-                // depends on the runtime). Whichever pair matches tells us
-                // the orientation and therefore where the signal lives.
-                var atTop = SampleAtFraction(map, desc.Format, w, h, FinderXCenter, FinderTopY);
-                var atBot = SampleAtFraction(map, desc.Format, w, h, FinderXCenter, FinderBotY);
-                LastFinderTop = atTop;
-                LastFinderBottom = atBot;
+                EnsureStaging(desc);
+                _context.CopyResource(_staging!, src);
 
-                Orientation o = DetectOrientation(atTop, atBot);
-                if (o == Orientation.Unknown)
+                if (_loggedSrcFormat != desc.Format)
                 {
-                    NoteFinderState(false, atTop, atBot);
-                    sample = PfSignalSample.None;
-                    return SampleResult.NoLock;
+                    _loggedSrcFormat = desc.Format;
+                    Logf($"PF mirror format: {desc.Format} {desc.Width}x{desc.Height}");
                 }
-                if (o != _orientation)
+
+                var map = _context.Map(_staging!, 0, MapMode.Read);
+                try
                 {
-                    _orientation = o;
-                    Logf($"PF orientation locked: {(o == Orientation.TopOrigin ? "top-origin (signal at y=0.03)" : "flipped (signal at y=0.97)")}");
+                    // Sample BOTH candidate finder positions; one of them is
+                    // the black block, the other is the white block
+                    // (orientation depends on the runtime). Whichever pair
+                    // matches tells us the orientation and therefore where
+                    // the signal lives.
+                    var atTop = SampleAtFraction(map, desc.Format, w, h, FinderXCenter, FinderTopY);
+                    var atBot = SampleAtFraction(map, desc.Format, w, h, FinderXCenter, FinderBotY);
+                    LastFinderTop = atTop;
+                    LastFinderBottom = atBot;
+
+                    Orientation o = DetectOrientation(atTop, atBot);
+                    if (o == Orientation.Unknown)
+                    {
+                        NoteFinderState(false, atTop, atBot);
+                        sample = PfSignalSample.None;
+                        return SampleResult.NoLock;
+                    }
+                    if (o != _orientation)
+                    {
+                        _orientation = o;
+                        Logf($"PF orientation locked: {(o == Orientation.TopOrigin ? "top-origin (signal at y=0.03)" : "flipped (signal at y=0.97)")}");
+                    }
+                    NoteFinderState(true, atTop, atBot);
+                    float sigY = o == Orientation.TopOrigin ? FinderTopY : FinderBotY;
+                    sample = SampleAtFraction(map, desc.Format, w, h, SamplePointX, sigY);
+                    return SampleResult.Locked;
                 }
-                NoteFinderState(true, atTop, atBot);
-                float sigY = o == Orientation.TopOrigin ? FinderTopY : FinderBotY;
-                sample = SampleAtFraction(map, desc.Format, w, h, SamplePointX, sigY);
-                return SampleResult.Locked;
+                finally { _context.Unmap(_staging!, 0); }
             }
-            finally { _context.Unmap(_staging!, 0); }
         }
         finally
         {
@@ -549,13 +559,14 @@ public sealed class PfSignalReader : IDisposable
         try
         {
             Directory.CreateDirectory(dir);
+            int seq = System.Threading.Interlocked.Increment(ref _captureCounter);
             var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
-            var path = Path.Combine(dir, $"reon-pfcapture-{stamp}.png");
+            var path = Path.Combine(dir, $"reon-pfcapture-{seq:D4}-{stamp}.png");
 
             switch (ActiveBackend)
             {
-                case CaptureBackend.OpenVrMirror: return CaptureOpenVrToFile(path);
-                case CaptureBackend.WindowCapture: return CaptureWindowToFile(path);
+                case CaptureBackend.OpenVrMirror: return CaptureOpenVrToFile(path, seq);
+                case CaptureBackend.WindowCapture: return CaptureWindowToFile(path, seq);
                 default: return null;
             }
         }
@@ -566,13 +577,17 @@ public sealed class PfSignalReader : IDisposable
         }
     }
 
-    private string? CaptureOpenVrToFile(string path)
+    private string? CaptureOpenVrToFile(string path, int seq)
     {
         if (_compositor is null || _device is null || _context is null) return null;
 
         IntPtr srvPtr = IntPtr.Zero;
         var err = _compositor.GetMirrorTextureD3D11(EVREye.Eye_Left, _device.NativePointer, ref srvPtr);
-        if (err != EVRCompositorError.None || srvPtr == IntPtr.Zero) return null;
+        if (err != EVRCompositorError.None || srvPtr == IntPtr.Zero)
+        {
+            Logf($"PF capture #{seq}: GetMirrorTextureD3D11 returned {err}, srv=0x{srvPtr.ToInt64():x}");
+            return null;
+        }
 
         try
         {
@@ -585,20 +600,40 @@ public sealed class PfSignalReader : IDisposable
             using var src = resource.QueryInterface<ID3D11Texture2D>();
             var desc = src.Description;
             if (desc.Width == 0 || desc.Height == 0) return null;
-
-            EnsureStaging(desc);
-            _context.CopyResource(_staging!, src);
             int w = (int)desc.Width, h = (int)desc.Height;
 
-            var map = _context.Map(_staging!, 0, MapMode.Read);
-            try
+            // Dedicated staging texture for capture so the Loop's _staging
+            // can keep running without contention beyond the lock window.
+            using var captureStaging = _device.CreateTexture2D(new Texture2DDescription
             {
-                using var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-                WriteMappedToBitmap(map, desc.Format, w, h, bmp);
+                Width = desc.Width, Height = desc.Height,
+                MipLevels = 1, ArraySize = 1,
+                Format = desc.Format,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+                MiscFlags = ResourceOptionFlags.None,
+            });
+
+            Bitmap bmp;
+            lock (_ctxLock)
+            {
+                _context.CopyResource(captureStaging, src);
+                var map = _context.Map(captureStaging, 0, MapMode.Read);
+                try
+                {
+                    bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                    WriteMappedToBitmap(map, desc.Format, w, h, bmp);
+                }
+                finally { _context.Unmap(captureStaging, 0); }
+            }
+            using (bmp)
+            {
                 OverlaySamplePositions(bmp);
                 bmp.Save(path, ImageFormat.Png);
             }
-            finally { _context.Unmap(_staging!, 0); }
+            Logf($"PF capture #{seq}: wrote {w}x{h} {desc.Format} srv=0x{srvPtr.ToInt64():x}");
             return path;
         }
         finally
@@ -607,7 +642,7 @@ public sealed class PfSignalReader : IDisposable
         }
     }
 
-    private string? CaptureWindowToFile(string path)
+    private string? CaptureWindowToFile(string path, int seq)
     {
         if (_vrchatHwnd == IntPtr.Zero || !IsWindow(_vrchatHwnd)) return null;
         if (!GetClientRect(_vrchatHwnd, out var rect)) return null;
@@ -638,6 +673,7 @@ public sealed class PfSignalReader : IDisposable
                 OverlaySamplePositions(clone);
                 clone.Save(path, ImageFormat.Png);
             }
+            Logf($"PF capture #{seq}: wrote {w}x{h} via PrintWindow");
             return path;
         }
         finally
