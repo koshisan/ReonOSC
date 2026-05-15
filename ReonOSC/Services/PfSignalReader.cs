@@ -23,25 +23,37 @@ namespace ReonOSC.Services;
 /// </summary>
 public sealed class PfSignalReader : IDisposable
 {
-    private const float SamplePointX = 0.5f + 0.04f;  // 0.54 — the signal pixel
-    private const float SamplePointY = 0.03f;
+    // Shader-side positions (Unity bottom-origin screen space — see
+    // PixelsOverlay.cginc): the signal pixel and the BLACK finder live at
+    // Unity-y = 0.97 (visual top of the screen), the WHITE finder at
+    // Unity-y = 0.03 (visual bottom). Whether that maps to memory-row 0.03
+    // or 0.97 in the mirror texture depends on the runtime's vertical
+    // orientation — OpenVR is free to hand us a Y-flipped mirror vs. what
+    // Unity submitted. PrintWindow on the desktop preview, by contrast, is
+    // always top-origin "as displayed".
+    //
+    // Rather than hard-code one orientation, we sample both possible finder
+    // positions on each frame and lock to whichever pair matches the
+    // expected black/white pattern.
+    private const float SamplePointX = 0.5f + 0.04f;   // 0.54 horizontally for the signal pixel
     private const int SampleRegion   = 4;
+    private const float FinderXCenter = 0.5f;          // finders are column-centred
+    private const float FinderTopY    = 0.03f;         // candidate y A
+    private const float FinderBotY    = 0.97f;         // candidate y B
+    // Tolerances. Shader writes exact 0 or 255 to a single 8x8 block. With
+    // 4x4 inset sampling we shouldn't see any edge bleed, so we can be
+    // strict — this is the main defence against scene content (a dark
+    // wall, a sunlit white surface) passing as a finder.
+    private const int FinderBlackMax = 32;
+    private const int FinderWhiteMin = 224;
 
-    // The PFSignal shader also renders two "finder" pixels at fixed screen
-    // positions: black near the top centre and white near the bottom centre.
-    // We sample these to verify the PFSignal quad is actually in view AND
-    // covering the expected screen positions — without that check we'd
-    // happily read random scene content (sky, terrain, avatars) when the
-    // user turns their head away from the world-origin signal mesh.
-    private const float FinderBlackX = 0.5f;
-    private const float FinderBlackY = 0.03f;   // black: top-centre
-    private const float FinderWhiteX = 0.5f;
-    private const float FinderWhiteY = 0.97f;   // white: bottom-centre
-    // Tolerances are deliberately generous — anti-aliasing, lens distortion
-    // and the 1-pixel hCenter rounding-off-by-one in the shader all bleed
-    // a couple of channels in/out of pure 0 / 255 at the block edges.
-    private const int FinderBlackMax = 64;
-    private const int FinderWhiteMin = 192;
+    /// <summary>How the mirror texture is oriented relative to the shader's
+    /// "Unity-y = top" convention. Top means memory-row 0.03 holds the
+    /// black + signal blocks (PrintWindow's desktop preview always behaves
+    /// this way). Flipped means memory-row 0.97 holds them (some OpenVR
+    /// runtimes flip the mirror).</summary>
+    private enum Orientation { Unknown, TopOrigin, Flipped }
+    private Orientation _orientation = Orientation.Unknown;
 
     public event EventHandler<PfSignalSample>? SignalChanged;
     public event EventHandler<string>? Log;
@@ -69,6 +81,13 @@ public sealed class PfSignalReader : IDisposable
     private PfSignalSample _last = PfSignalSample.None;
     private Format _loggedSrcFormat = Format.Unknown; // log mirror texture format once per session/reconnect
     private bool _lastFinderState; // false=invisible/no-lock, true=quad is in view; logged on transitions only
+
+    /// <summary>Latest sample from the candidate finder position at y=0.03.
+    /// Surfaced for the Capture diagnostic so the user can see exactly what
+    /// each probe is reading without having to attach a debugger.</summary>
+    public PfSignalSample LastFinderTop { get; private set; }
+    public PfSignalSample LastFinderBottom { get; private set; }
+    public string LastOrientation => _orientation.ToString();
 
     public void Start()
     {
@@ -184,16 +203,30 @@ public sealed class PfSignalReader : IDisposable
             var map = _context.Map(_staging!, 0, MapMode.Read);
             try
             {
-                var black = SampleAtFraction(map, desc.Format, w, h, FinderBlackX, FinderBlackY);
-                var white = SampleAtFraction(map, desc.Format, w, h, FinderWhiteX, FinderWhiteY);
-                if (!ValidateFinders(black, white))
+                // Sample BOTH candidate finder positions; one of them is the
+                // black block, the other is the white block (orientation
+                // depends on the runtime). Whichever pair matches tells us
+                // the orientation and therefore where the signal lives.
+                var atTop = SampleAtFraction(map, desc.Format, w, h, FinderXCenter, FinderTopY);
+                var atBot = SampleAtFraction(map, desc.Format, w, h, FinderXCenter, FinderBotY);
+                LastFinderTop = atTop;
+                LastFinderBottom = atBot;
+
+                Orientation o = DetectOrientation(atTop, atBot);
+                if (o == Orientation.Unknown)
                 {
-                    NoteFinderState(false, black, white);
+                    NoteFinderState(false, atTop, atBot);
                     sample = PfSignalSample.None;
                     return SampleResult.NoLock;
                 }
-                NoteFinderState(true, black, white);
-                sample = SampleAtFraction(map, desc.Format, w, h, SamplePointX, SamplePointY);
+                if (o != _orientation)
+                {
+                    _orientation = o;
+                    Logf($"PF orientation locked: {(o == Orientation.TopOrigin ? "top-origin (signal at y=0.03)" : "flipped (signal at y=0.97)")}");
+                }
+                NoteFinderState(true, atTop, atBot);
+                float sigY = o == Orientation.TopOrigin ? FinderTopY : FinderBotY;
+                sample = SampleAtFraction(map, desc.Format, w, h, SamplePointX, sigY);
                 return SampleResult.Locked;
             }
             finally { _context.Unmap(_staging!, 0); }
@@ -263,17 +296,27 @@ public sealed class PfSignalReader : IDisposable
             if (!PrintWindow(_vrchatHwnd, memDC, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
                 return SampleResult.NoData;
 
-            var black = SampleGdi(memDC, w, h, FinderBlackX, FinderBlackY);
-            var white = SampleGdi(memDC, w, h, FinderWhiteX, FinderWhiteY);
-            if (black is null || white is null) return SampleResult.NoData;
-            if (!ValidateFinders(black.Value, white.Value))
+            var atTop = SampleGdi(memDC, w, h, FinderXCenter, FinderTopY);
+            var atBot = SampleGdi(memDC, w, h, FinderXCenter, FinderBotY);
+            if (atTop is null || atBot is null) return SampleResult.NoData;
+            LastFinderTop = atTop.Value;
+            LastFinderBottom = atBot.Value;
+
+            Orientation o = DetectOrientation(atTop.Value, atBot.Value);
+            if (o == Orientation.Unknown)
             {
-                NoteFinderState(false, black.Value, white.Value);
+                NoteFinderState(false, atTop.Value, atBot.Value);
                 sample = PfSignalSample.None;
                 return SampleResult.NoLock;
             }
-            NoteFinderState(true, black.Value, white.Value);
-            var signal = SampleGdi(memDC, w, h, SamplePointX, SamplePointY);
+            if (o != _orientation)
+            {
+                _orientation = o;
+                Logf($"PF orientation locked: {(o == Orientation.TopOrigin ? "top-origin (signal at y=0.03)" : "flipped (signal at y=0.97)")}");
+            }
+            NoteFinderState(true, atTop.Value, atBot.Value);
+            float sigY = o == Orientation.TopOrigin ? FinderTopY : FinderBotY;
+            var signal = SampleGdi(memDC, w, h, SamplePointX, sigY);
             if (signal is null) return SampleResult.NoData;
             sample = signal.Value;
             return SampleResult.Locked;
@@ -522,24 +565,38 @@ public sealed class PfSignalReader : IDisposable
         return AveragePixel(map, format, sx, sy);
     }
 
-    /// <summary>True if the two finder pixels look like the PFSignal black
-    /// (top centre) and white (bottom centre) blocks. When this is false
-    /// the world-origin PFSignal quad is not currently rendering into the
-    /// eye buffer at the expected screen positions, so any value at the
-    /// signal pixel is scene content, not a level cue.</summary>
-    private static bool ValidateFinders(PfSignalSample black, PfSignalSample white) =>
-        black.R <= FinderBlackMax && black.G <= FinderBlackMax && black.B <= FinderBlackMax &&
-        white.R >= FinderWhiteMin && white.G >= FinderWhiteMin && white.B >= FinderWhiteMin;
+    /// <summary>Pure black: all channels under the strict threshold.</summary>
+    private static bool LooksBlack(PfSignalSample p) =>
+        p.R <= FinderBlackMax && p.G <= FinderBlackMax && p.B <= FinderBlackMax;
+
+    /// <summary>Pure white: all channels above the strict threshold.</summary>
+    private static bool LooksWhite(PfSignalSample p) =>
+        p.R >= FinderWhiteMin && p.G >= FinderWhiteMin && p.B >= FinderWhiteMin;
+
+    /// <summary>Detect which way the mirror texture is oriented based on
+    /// the two finder samples. The shader puts BLACK at Unity-top and
+    /// WHITE at Unity-bottom; in a top-origin memory layout that means
+    /// black at low row indices, white at high row indices. A flipped
+    /// runtime swaps these.</summary>
+    private static Orientation DetectOrientation(PfSignalSample atTop, PfSignalSample atBot)
+    {
+        if (LooksBlack(atTop) && LooksWhite(atBot)) return Orientation.TopOrigin;
+        if (LooksWhite(atTop) && LooksBlack(atBot)) return Orientation.Flipped;
+        return Orientation.Unknown;
+    }
 
     /// <summary>Edge-trigger log on finder visibility transitions so the
     /// user knows why the level might not be updating, but without spamming
-    /// the log on every frame.</summary>
-    private void NoteFinderState(bool valid, PfSignalSample black, PfSignalSample white)
+    /// the log on every frame. Args are the two candidate-position samples;
+    /// when transitioning to a visible state we report which of them was
+    /// black and which was white so a glance at the log explains the
+    /// orientation auto-detect's choice.</summary>
+    private void NoteFinderState(bool valid, PfSignalSample atTop, PfSignalSample atBot)
     {
         if (valid == _lastFinderState) return;
         _lastFinderState = valid;
-        if (valid) Logf($"PF: finders detected, signal lock acquired (black={black}, white={white}).");
-        else       Logf($"PF: finders lost — PFSignal quad not in view (black={black}, white={white}). Level held until lock returns.");
+        if (valid) Logf($"PF: finders detected — y0.03={atTop} y0.97={atBot}");
+        else       Logf($"PF: finders lost — y0.03={atTop} y0.97={atBot}. Level held until lock returns.");
     }
 
     /// <summary>

@@ -490,7 +490,14 @@ public sealed class WebViewBridge : IDisposable
         var label = payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty("label", out var l)
                     ? l.GetString() : null;
         var prefix = string.IsNullOrWhiteSpace(label) ? "PF capture" : $"PF capture [{label!.Trim()}]";
-        Push("log.line", new { t = Ts(), kind = "info", msg = $"{prefix}: {_lastPfHex}" });
+        // Dump the full sampling state so an instability report shows exactly
+        // what the reader sees — the two candidate finder positions, the
+        // signal pixel, the auto-detected orientation, and the backend. This
+        // is what we'd want in a bug report.
+        var top = _service.PfSignal.LastFinderTop;
+        var bot = _service.PfSignal.LastFinderBottom;
+        Push("log.line", new { t = Ts(), kind = "info", msg =
+            $"{prefix}: signal={_lastPfHex} y0.03={top} y0.97={bot} orient={_service.PfSignal.LastOrientation} backend={_service.PfSignal.ActiveBackend}" });
     }
 
     private void TogglePfHook(JsonElement payload)
