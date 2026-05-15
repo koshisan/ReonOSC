@@ -19,19 +19,38 @@ public sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon _tray;
     private readonly StatusIcons _icons = new();
 
-    // Boot trace — writes one line per phase to %APPDATA%\reon\bootlog.txt so a
-    // silent "no tray icon, no error" startup can be diagnosed without a debugger.
-    // Each phase entry runs through Trace() which catches all I/O exceptions.
-    private static readonly string BootLogPath = Path.Combine(Settings.ConfigDir, "bootlog.txt");
+    // Boot trace — surfaces phase markers through three channels so a silent
+    // "no tray icon, no error" startup is always diagnosable:
+    //   1. Debug.WriteLine  → VS Output window when running in the debugger
+    //   2. %APPDATA%\reon\bootlog.txt → survives a full release-mode run
+    //   3. %TEMP%\reonosc_bootlog.txt → fallback if ConfigDir is unwritable
+    // All file writes are best-effort and never throw.
+    private static readonly string BootLogPath = SafeCombine(Settings.ConfigDir, "bootlog.txt");
+    private static readonly string FallbackBootLogPath = SafeCombine(Path.GetTempPath(), "reonosc_bootlog.txt");
+    private static string SafeCombine(string a, string b)
+    {
+        try { return Path.Combine(a, b); } catch { return b; }
+    }
     private static void Trace(string phase)
     {
+        var line = $"{DateTime.Now:HH:mm:ss.fff} [tid {Environment.CurrentManagedThreadId}] {phase}";
+        try { System.Diagnostics.Debug.WriteLine($"[ReonOSC boot] {line}"); } catch { }
         try
         {
-            Directory.CreateDirectory(Settings.ConfigDir);
-            File.AppendAllText(BootLogPath,
-                $"{DateTime.Now:HH:mm:ss.fff} [tid {Environment.CurrentManagedThreadId}] {phase}{Environment.NewLine}");
+            Directory.CreateDirectory(Path.GetDirectoryName(BootLogPath) ?? ".");
+            File.AppendAllText(BootLogPath, line + Environment.NewLine);
         }
-        catch { }
+        catch
+        {
+            try { File.AppendAllText(FallbackBootLogPath, line + Environment.NewLine); } catch { }
+        }
+    }
+
+    // Static ctor — confirms the type itself loaded. If this line never lands in
+    // either log it tells us TrayContext's class init is failing (TypeInitializationException).
+    static TrayContext()
+    {
+        try { File.WriteAllText(FallbackBootLogPath, $"{DateTime.Now:HH:mm:ss.fff} [static-cctor] TrayContext type init OK; APPDATA bootlog target={BootLogPath}{Environment.NewLine}"); } catch { }
     }
 
     public TrayContext()
