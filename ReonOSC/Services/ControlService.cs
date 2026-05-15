@@ -58,11 +58,14 @@ public sealed class ControlService : IAsyncDisposable
         // we trigger a reconcile and the next target picks PF over OSC.
         //
         // Temporal smoothing: require the same decoded state across N
-        // consecutive samples before propagating it. At ~25 Hz, N=3 is
-        // ~120 ms — well below the perceptual threshold for thermal change
-        // but above the typical single-frame jitter window from MSAA /
-        // supersampling / lens-distortion sub-pixel shifts. Without this
-        // the level was flipping mid-frame on edge motion in VR.
+        // consecutive samples before propagating it. The threshold is
+        // ASYMMETRIC — entering an active thermal state (Cool/Hot) should
+        // feel responsive (~120 ms), while leaving it (going to Off, which
+        // stops the Reon) needs more inertia. PFSignal world setups can
+        // flicker the active mesh off briefly at collider edges or during
+        // a state swap in Udon, and a 3-frame Off blip would otherwise
+        // bounce a sustained-cool through Stop and back, audible to the
+        // user as a half-second hiccup.
         PfSignal.SignalChanged += (_, sample) =>
         {
             var next = PfSignalDecoder.Decode(sample);
@@ -76,7 +79,10 @@ public sealed class ControlService : IAsyncDisposable
                 _pfCandidateCount = 1;
             }
 
-            if (_pfCandidateCount >= PfStabilityFrames && next != _pfState)
+            int required = next.Mode == PfThermalMode.Off
+                ? PfStabilityFramesOff
+                : PfStabilityFramesActive;
+            if (_pfCandidateCount >= required && next != _pfState)
             {
                 _pfState = next;
                 _ = ReconcileAsync();
@@ -87,7 +93,14 @@ public sealed class ControlService : IAsyncDisposable
     private PfThermalState _pfState = PfThermalState.Off;
     private PfThermalState _pfCandidate = PfThermalState.Off;
     private int _pfCandidateCount;
-    private const int PfStabilityFrames = 3;
+    /// <summary>Frames required to commit a transition to an active
+    /// (Cool/Hot) state. ~120 ms at the reader's 25 Hz default.</summary>
+    private const int PfStabilityFramesActive = 3;
+    /// <summary>Frames required to commit a transition to Off. ~320 ms —
+    /// long enough to absorb a Udon collider edge flicker without bouncing
+    /// the Reon, short enough that genuinely leaving the heat zone still
+    /// stops cooling within a third of a second.</summary>
+    private const int PfStabilityFramesOff = 8;
 
     public async ValueTask DisposeAsync()
     {
