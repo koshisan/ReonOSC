@@ -649,10 +649,12 @@ public sealed class PfSignalReader : IDisposable
         }
     }
 
-    /// <summary>Convert a mapped staging texture to BGRA32 in a Bitmap,
-    /// applying the same per-format normalisation as the runtime reader so
-    /// the saved image faithfully reflects what we sample. Final image is
-    /// linear-encoded bytes — that's what the decoder operates on.</summary>
+    /// <summary>Convert a mapped staging texture to BGRA32 in a Bitmap.
+    /// ReadPixel gives us LINEAR floats — for a PNG that's meant for human
+    /// inspection we re-encode through the sRGB curve so the saved image
+    /// matches what the user actually sees through the headset (Windows
+    /// taskbar blue, etc.), not the perceptually-darker linear bytes the
+    /// decoder operates on.</summary>
     private static void WriteMappedToBitmap(MappedSubresource map, Format format, int w, int h, Bitmap bmp)
     {
         var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
@@ -670,9 +672,10 @@ public sealed class PfSignalReader : IDisposable
                     for (int x = 0; x < w; x++)
                     {
                         ReadPixel(srow, x, format, out double r, out double g, out double b);
-                        byte rb = (byte)Math.Clamp(Math.Round(r * 255.0), 0, 255);
-                        byte gb = (byte)Math.Clamp(Math.Round(g * 255.0), 0, 255);
-                        byte bb = (byte)Math.Clamp(Math.Round(b * 255.0), 0, 255);
+                        byte rb = (byte)Math.Clamp(Math.Round(LinearToSrgb(r) * 255.0), 0, 255);
+                        byte gb = (byte)Math.Clamp(Math.Round(LinearToSrgb(g) * 255.0), 0, 255);
+                        byte bb = (byte)Math.Clamp(Math.Round(LinearToSrgb(b) * 255.0), 0, 255);
+                        // Format32bppArgb is BGRA in memory on little-endian.
                         drow[x * 4 + 0] = bb;
                         drow[x * 4 + 1] = gb;
                         drow[x * 4 + 2] = rb;
@@ -682,6 +685,15 @@ public sealed class PfSignalReader : IDisposable
             }
         }
         finally { bmp.UnlockBits(data); }
+    }
+
+    /// <summary>IEC 61966-2-1 forward transfer — linear 0..1 → sRGB 0..1.</summary>
+    private static double LinearToSrgb(double linear)
+    {
+        if (linear <= 0) return 0;
+        if (linear >= 1) return 1;
+        if (linear <= 0.0031308) return 12.92 * linear;
+        return 1.055 * Math.Pow(linear, 1.0 / 2.4) - 0.055;
     }
 
     /// <summary>Draw red crosshairs at the three sample positions (both
@@ -823,20 +835,24 @@ public sealed class PfSignalReader : IDisposable
 
     /// <summary>Read a single pixel from row at column x, decoding whichever
     /// pixel format the mirror exposes, and return LINEAR floating-point RGB
-    /// in [0, 1]. Falls back to BGRA8 for unrecognised formats so we still
-    /// produce a defined value (rather than crashing) — the decoder is
-    /// tolerant enough that approximate values still classify correctly.</summary>
+    /// in [0, 1]. Handles every format the OpenVR compositor mirror has been
+    /// observed to expose plus the Typeless variants that aliased SRVs can
+    /// surface — without explicit cases for those, an SRGB eye buffer with
+    /// a Typeless format ID would fall to the BGRA fallback and emit colours
+    /// with R / B swapped relative to the actual storage order.</summary>
     private static unsafe void ReadPixel(byte* row, int x, Format format, out double r, out double g, out double b)
     {
         switch (format)
         {
-            // BGRA / BGRX UNORM — assume sRGB (Linear-space Unity outputs to
-            // a sRGB-typed buffer; the same memory often gets exposed via a
-            // plain UNORM SRV, so we don't see _SRgb on the format).
+            // BGRA / BGRX 8-bit, all sRGB / UNORM / Typeless variants treated
+            // as sRGB-encoded (Unity in linear color space writes through an
+            // sRGB-typed view even when the resource is Typeless).
             case Format.B8G8R8A8_UNorm:
             case Format.B8G8R8X8_UNorm:
             case Format.B8G8R8A8_UNorm_SRgb:
             case Format.B8G8R8X8_UNorm_SRgb:
+            case Format.B8G8R8A8_Typeless:
+            case Format.B8G8R8X8_Typeless:
             {
                 byte* p = row + x * 4;
                 r = SrgbToLinear(p[2] / 255.0);
@@ -847,6 +863,7 @@ public sealed class PfSignalReader : IDisposable
 
             case Format.R8G8B8A8_UNorm:
             case Format.R8G8B8A8_UNorm_SRgb:
+            case Format.R8G8B8A8_Typeless:
             {
                 byte* p = row + x * 4;
                 r = SrgbToLinear(p[0] / 255.0);
@@ -858,6 +875,7 @@ public sealed class PfSignalReader : IDisposable
             // R16G16B16A16_FLOAT — half-precision linear, common for HDR
             // eye buffers in VRChat. Read as 4 halves per pixel; no gamma.
             case Format.R16G16B16A16_Float:
+            case Format.R16G16B16A16_Typeless:
             {
                 ushort* p = (ushort*)(row + x * 8);
                 r = HalfToFloat(p[0]);
@@ -868,6 +886,7 @@ public sealed class PfSignalReader : IDisposable
 
             // R10G10B10A2 UNORM — sometimes used for HDR-lite mirrors.
             case Format.R10G10B10A2_UNorm:
+            case Format.R10G10B10A2_Typeless:
             {
                 uint* p = (uint*)(row + x * 4);
                 uint v = *p;
@@ -879,8 +898,9 @@ public sealed class PfSignalReader : IDisposable
 
             default:
             {
-                // Best-effort BGRA fallback. The next pass logs the unknown
-                // format so we know to add explicit support.
+                // Best-effort BGRA fallback (most modern Windows swap chains
+                // are BGRA). The format-log message at the top of capture
+                // surfaces which one we hit so we can add an explicit case.
                 byte* p = row + x * 4;
                 r = p[2] / 255.0; g = p[1] / 255.0; b = p[0] / 255.0;
                 return;
