@@ -181,11 +181,11 @@ function App() {
 
   useEffect(() => { localStorage.setItem("reon.spark", showSparkline ? "1" : "0"); }, [showSparkline]);
 
-  // Left column has two collapsible panels (Configuration, Log) that are
-  // mutually exclusive — only one open at a time. null means both collapsed.
+  // Left column has three collapsible panels (Configuration, MQTT, Log)
+  // that are mutually exclusive — only one open at a time. null = all collapsed.
   const [openPanel, setOpenPanel] = useState(() => {
     const v = localStorage.getItem("reon.openPanel");
-    return v === "config" || v === "log" ? v : null;
+    return v === "config" || v === "mqtt" || v === "log" ? v : null;
   });
   useEffect(() => {
     if (openPanel) localStorage.setItem("reon.openPanel", openPanel);
@@ -572,18 +572,6 @@ function App() {
                   <span className={`pulse ${oscRunning ? "" : "off"}`} style={oscRunning ? {background: "var(--accent)", boxShadow: `0 0 0 0 ${accent}80`} : null}/>
                   {oscRunning ? `OSC ${oscPort} · ${oscPackets} pkt` : "OSC off"}
                 </span>
-                {mqttCfg.enabled && (
-                  <span
-                    className={`pill ${mqttState.state === "Connected" ? "connected" : "disconnected"}`}
-                    title={mqttState.error || ""}
-                  >
-                    <span className={`pulse ${mqttState.state === "Connected" ? "" : "off"}`}/>
-                    MQTT {mqttState.state === "Connected" ? "live"
-                        : mqttState.state === "Connecting" ? "…"
-                        : mqttState.state === "Error" ? "error"
-                        : "down"}
-                  </span>
-                )}
                 <Icon name={openPanel === "config" ? "chevU" : "chevD"} size={14}/>
               </div>
             </div>
@@ -605,92 +593,6 @@ function App() {
                   <button className={`btn ${oscRunning ? "danger" : "primary"}`} onClick={toggleOsc}>
                     {oscRunning ? <><Icon name="stop"/> Stop</> : <><Icon name="play"/> Start</>}
                   </button>
-                </div>
-
-                <div className="config-divider"/>
-
-                {/* MQTT publisher — pushes state to Home Assistant. */}
-                <div className="config-section-title">
-                  MQTT publish
-                  <span style={{flex: 1}}/>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      checked={mqttCfg.enabled}
-                      onChange={(e) => commitMqtt({ enabled: e.target.checked })}
-                    />
-                    <span className="toggle-track"/>
-                    <span className={`toggle-label ${mqttCfg.enabled ? "strong" : ""}`}>Enabled</span>
-                  </label>
-                </div>
-                <div style={{opacity: mqttCfg.enabled ? 1 : 0.55, transition: "opacity 0.15s"}}>
-                  <div className="osc-row">
-                    <span className="osc-label">Broker host</span>
-                    <input
-                      className="input mono"
-                      placeholder="homeassistant.local"
-                      value={mqttCfg.host}
-                      onChange={(e) => setMqttCfg((m) => ({...m, host: e.target.value}))}
-                      onBlur={(e) => commitMqtt({ host: e.target.value })}
-                    />
-                  </div>
-                  <div className="osc-row">
-                    <span className="osc-label">Port</span>
-                    <NumInput
-                      value={mqttCfg.port}
-                      onChange={(v) => commitMqtt({ port: v })}
-                      min={1} max={65535} step={1} width={96}
-                    />
-                  </div>
-                  <div className="osc-row">
-                    <span className="osc-label">Username</span>
-                    <input
-                      className="input mono"
-                      value={mqttCfg.username}
-                      onChange={(e) => setMqttCfg((m) => ({...m, username: e.target.value}))}
-                      onBlur={(e) => commitMqtt({ username: e.target.value })}
-                    />
-                  </div>
-                  <div className="osc-row">
-                    <span className="osc-label">Password</span>
-                    <input
-                      className="input mono"
-                      type="password"
-                      placeholder="(unchanged)"
-                      value={mqttCfg.password}
-                      onChange={(e) => setMqttCfg((m) => ({...m, password: e.target.value}))}
-                      onBlur={(e) => {
-                        if (e.target.value) commitMqtt({ password: e.target.value });
-                      }}
-                    />
-                  </div>
-                  <div className="osc-row">
-                    <span className="osc-label">Base topic</span>
-                    <input
-                      className="input mono"
-                      value={mqttCfg.baseTopic}
-                      onChange={(e) => setMqttCfg((m) => ({...m, baseTopic: e.target.value}))}
-                      onBlur={(e) => commitMqtt({ baseTopic: e.target.value })}
-                    />
-                  </div>
-                  <div className="osc-row">
-                    <span className="osc-label">HA discovery prefix <span className="tag" style={{color: "var(--text-muted)"}}>blank to disable</span></span>
-                    <input
-                      className="input mono"
-                      placeholder="homeassistant"
-                      value={mqttCfg.discoveryPrefix}
-                      onChange={(e) => setMqttCfg((m) => ({...m, discoveryPrefix: e.target.value}))}
-                      onBlur={(e) => commitMqtt({ discoveryPrefix: e.target.value })}
-                    />
-                  </div>
-                  {mqttState.error && (
-                    <div className="osc-row">
-                      <span className="osc-label" style={{color: "var(--danger)"}}>Last error</span>
-                      <span className="tag mono" style={{color: "var(--danger)", borderColor: "color-mix(in oklab, var(--danger) 40%, var(--border))"}}>
-                        {mqttState.error}
-                      </span>
-                    </div>
-                  )}
                 </div>
 
                 <div className="config-divider"/>
@@ -826,7 +728,120 @@ function App() {
             )}
           </div>
 
-          {/* Log — collapsible, mutually exclusive with Configuration above */}
+          {/* MQTT publish — collapsible, mutually exclusive with siblings.
+              Header shows live status; body holds the broker config. */}
+          <div className="card">
+            <div className="card-header card-toggle" onClick={() => togglePanel("mqtt")}>
+              <div className="card-title"><span className="dot"/>MQTT publish</div>
+              <div style={{display: "flex", alignItems: "center", gap: 10}}>
+                {mqttCfg.enabled ? (
+                  <span
+                    className={`pill ${mqttState.state === "Connected" ? "connected" : "disconnected"}`}
+                    title={mqttState.error || ""}
+                  >
+                    <span className={`pulse ${mqttState.state === "Connected" ? "" : "off"}`}/>
+                    {mqttState.state === "Connected" ? "live"
+                      : mqttState.state === "Connecting" ? "connecting…"
+                      : mqttState.state === "Error" ? "error"
+                      : mqttState.state === "Unavailable" ? "unavailable"
+                      : "down"}
+                  </span>
+                ) : (
+                  <span className="pill disconnected"><span className="pulse off"/>off</span>
+                )}
+                <Icon name={openPanel === "mqtt" ? "chevU" : "chevD"} size={14}/>
+              </div>
+            </div>
+            {openPanel === "mqtt" && (
+              <div className="card-body">
+                <div className="row between">
+                  <span className="osc-label" style={{color: "var(--text-dim)"}}>
+                    Push state to a broker (Home Assistant via auto-discovery)
+                  </span>
+                  <label className="toggle" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={mqttCfg.enabled}
+                      onChange={(e) => commitMqtt({ enabled: e.target.checked })}
+                    />
+                    <span className="toggle-track"/>
+                    <span className={`toggle-label ${mqttCfg.enabled ? "strong" : ""}`}>Enabled</span>
+                  </label>
+                </div>
+                <div style={{opacity: mqttCfg.enabled ? 1 : 0.55, transition: "opacity 0.15s"}}>
+                  <div className="osc-row">
+                    <span className="osc-label">Broker host</span>
+                    <input
+                      className="input mono"
+                      placeholder="homeassistant.local"
+                      value={mqttCfg.host}
+                      onChange={(e) => setMqttCfg((m) => ({...m, host: e.target.value}))}
+                      onBlur={(e) => commitMqtt({ host: e.target.value })}
+                    />
+                  </div>
+                  <div className="osc-row">
+                    <span className="osc-label">Port</span>
+                    <NumInput
+                      value={mqttCfg.port}
+                      onChange={(v) => commitMqtt({ port: v })}
+                      min={1} max={65535} step={1} width={96}
+                    />
+                  </div>
+                  <div className="osc-row">
+                    <span className="osc-label">Username</span>
+                    <input
+                      className="input mono"
+                      value={mqttCfg.username}
+                      onChange={(e) => setMqttCfg((m) => ({...m, username: e.target.value}))}
+                      onBlur={(e) => commitMqtt({ username: e.target.value })}
+                    />
+                  </div>
+                  <div className="osc-row">
+                    <span className="osc-label">Password</span>
+                    <input
+                      className="input mono"
+                      type="password"
+                      placeholder="(unchanged)"
+                      value={mqttCfg.password}
+                      onChange={(e) => setMqttCfg((m) => ({...m, password: e.target.value}))}
+                      onBlur={(e) => {
+                        if (e.target.value) commitMqtt({ password: e.target.value });
+                      }}
+                    />
+                  </div>
+                  <div className="osc-row">
+                    <span className="osc-label">Base topic</span>
+                    <input
+                      className="input mono"
+                      value={mqttCfg.baseTopic}
+                      onChange={(e) => setMqttCfg((m) => ({...m, baseTopic: e.target.value}))}
+                      onBlur={(e) => commitMqtt({ baseTopic: e.target.value })}
+                    />
+                  </div>
+                  <div className="osc-row">
+                    <span className="osc-label">HA discovery prefix <span className="tag" style={{color: "var(--text-muted)"}}>blank to disable</span></span>
+                    <input
+                      className="input mono"
+                      placeholder="homeassistant"
+                      value={mqttCfg.discoveryPrefix}
+                      onChange={(e) => setMqttCfg((m) => ({...m, discoveryPrefix: e.target.value}))}
+                      onBlur={(e) => commitMqtt({ discoveryPrefix: e.target.value })}
+                    />
+                  </div>
+                  {mqttState.error && (
+                    <div className="osc-row">
+                      <span className="osc-label" style={{color: "var(--danger)"}}>Last error</span>
+                      <span className="tag mono" style={{color: "var(--danger)", borderColor: "color-mix(in oklab, var(--danger) 40%, var(--border))"}}>
+                        {mqttState.error}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Log — collapsible, mutually exclusive with siblings above */}
           <div className="card">
             <div className="card-header card-toggle" onClick={() => togglePanel("log")}>
               <div className="card-title"><span className="dot"/>Log</div>
