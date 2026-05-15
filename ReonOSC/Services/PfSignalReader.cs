@@ -23,9 +23,25 @@ namespace ReonOSC.Services;
 /// </summary>
 public sealed class PfSignalReader : IDisposable
 {
-    private const float SamplePointX = 0.5f + 0.04f;  // 0.54
+    private const float SamplePointX = 0.5f + 0.04f;  // 0.54 — the signal pixel
     private const float SamplePointY = 0.03f;
     private const int SampleRegion   = 4;
+
+    // The PFSignal shader also renders two "finder" pixels at fixed screen
+    // positions: black near the top centre and white near the bottom centre.
+    // We sample these to verify the PFSignal quad is actually in view AND
+    // covering the expected screen positions — without that check we'd
+    // happily read random scene content (sky, terrain, avatars) when the
+    // user turns their head away from the world-origin signal mesh.
+    private const float FinderBlackX = 0.5f;
+    private const float FinderBlackY = 0.03f;   // black: top-centre
+    private const float FinderWhiteX = 0.5f;
+    private const float FinderWhiteY = 0.97f;   // white: bottom-centre
+    // Tolerances are deliberately generous — anti-aliasing, lens distortion
+    // and the 1-pixel hCenter rounding-off-by-one in the shader all bleed
+    // a couple of channels in/out of pure 0 / 255 at the block edges.
+    private const int FinderBlackMax = 64;
+    private const int FinderWhiteMin = 192;
 
     public event EventHandler<PfSignalSample>? SignalChanged;
     public event EventHandler<string>? Log;
@@ -35,6 +51,12 @@ public sealed class PfSignalReader : IDisposable
 
     public enum CaptureBackend { None, OpenVrMirror, WindowCapture }
     public CaptureBackend ActiveBackend { get; private set; } = CaptureBackend.None;
+
+    /// <summary>Outcome of one TrySample call. The loop distinguishes
+    /// "backend is alive but we're not seeing the finders" (NoLock, normal
+    /// when the user's gaze is off the PFSignal mesh) from "backend died"
+    /// (NoData, triggers the re-probe path).</summary>
+    private enum SampleResult { NoData, NoLock, Locked }
 
     private CVRSystem? _vr;
     private CVRCompositor? _compositor;
@@ -46,6 +68,7 @@ public sealed class PfSignalReader : IDisposable
     private Task? _loopTask;
     private PfSignalSample _last = PfSignalSample.None;
     private Format _loggedSrcFormat = Format.Unknown; // log mirror texture format once per session/reconnect
+    private bool _lastFinderState; // false=invisible/no-lock, true=quad is in view; logged on transitions only
 
     public void Start()
     {
@@ -127,29 +150,26 @@ public sealed class PfSignalReader : IDisposable
         _vr = null; _compositor = null;
     }
 
-    private bool TrySampleOpenVR(out PfSignalSample sample)
+    private SampleResult TrySampleOpenVR(out PfSignalSample sample)
     {
         sample = PfSignalSample.None;
-        if (_compositor is null || _device is null || _context is null) return false;
+        if (_compositor is null || _device is null || _context is null) return SampleResult.NoData;
 
         IntPtr srvPtr = IntPtr.Zero;
         var err = _compositor.GetMirrorTextureD3D11(EVREye.Eye_Left, _device.NativePointer, ref srvPtr);
-        if (err != EVRCompositorError.None || srvPtr == IntPtr.Zero) return false;
+        if (err != EVRCompositorError.None || srvPtr == IntPtr.Zero) return SampleResult.NoData;
 
         try
         {
             var iidSrv = typeof(ID3D11ShaderResourceView).GUID;
             int hr = Marshal.QueryInterface(srvPtr, ref iidSrv, out var srvOwned);
-            if (hr != 0 || srvOwned == IntPtr.Zero) return false;
+            if (hr != 0 || srvOwned == IntPtr.Zero) return SampleResult.NoData;
 
             using var srv = new ID3D11ShaderResourceView(srvOwned);
             using var resource = srv.Resource;
             using var src = resource.QueryInterface<ID3D11Texture2D>();
             var desc = src.Description;
-            if (desc.Width == 0 || desc.Height == 0) return false;
-
-            int sx = Math.Clamp((int)(desc.Width  * SamplePointX) - SampleRegion / 2, 0, (int)desc.Width  - SampleRegion);
-            int sy = Math.Clamp((int)(desc.Height * SamplePointY) - SampleRegion / 2, 0, (int)desc.Height - SampleRegion);
+            if (desc.Width == 0 || desc.Height == 0) return SampleResult.NoData;
 
             EnsureStaging(desc);
             _context.CopyResource(_staging!, src);
@@ -160,8 +180,22 @@ public sealed class PfSignalReader : IDisposable
                 Logf($"PF mirror format: {desc.Format} {desc.Width}x{desc.Height}");
             }
 
+            int w = (int)desc.Width, h = (int)desc.Height;
             var map = _context.Map(_staging!, 0, MapMode.Read);
-            try { sample = AveragePixel(map, desc.Format, sx, sy); return true; }
+            try
+            {
+                var black = SampleAtFraction(map, desc.Format, w, h, FinderBlackX, FinderBlackY);
+                var white = SampleAtFraction(map, desc.Format, w, h, FinderWhiteX, FinderWhiteY);
+                if (!ValidateFinders(black, white))
+                {
+                    NoteFinderState(false, black, white);
+                    sample = PfSignalSample.None;
+                    return SampleResult.NoLock;
+                }
+                NoteFinderState(true, black, white);
+                sample = SampleAtFraction(map, desc.Format, w, h, SamplePointX, SamplePointY);
+                return SampleResult.Locked;
+            }
             finally { _context.Unmap(_staging!, 0); }
         }
         finally
@@ -200,31 +234,26 @@ public sealed class PfSignalReader : IDisposable
         return true;
     }
 
-    private bool TrySampleWindow(out PfSignalSample sample)
+    private SampleResult TrySampleWindow(out PfSignalSample sample)
     {
         sample = PfSignalSample.None;
-        if (_vrchatHwnd == IntPtr.Zero || !IsWindow(_vrchatHwnd)) return false;
-        if (!GetClientRect(_vrchatHwnd, out var rect)) return false;
+        if (_vrchatHwnd == IntPtr.Zero || !IsWindow(_vrchatHwnd)) return SampleResult.NoData;
+        if (!GetClientRect(_vrchatHwnd, out var rect)) return SampleResult.NoData;
         int w = rect.Right - rect.Left;
         int h = rect.Bottom - rect.Top;
-        if (w <= 0 || h <= 0) return false;
-
-        int sx = (int)(w * SamplePointX);
-        int sy = (int)(h * SamplePointY);
-        sx = Math.Clamp(sx, SampleRegion / 2, w - SampleRegion / 2 - 1);
-        sy = Math.Clamp(sy, SampleRegion / 2, h - SampleRegion / 2 - 1);
+        if (w <= 0 || h <= 0) return SampleResult.NoData;
 
         IntPtr windowDC = GetWindowDC(_vrchatHwnd);
-        if (windowDC == IntPtr.Zero) return false;
+        if (windowDC == IntPtr.Zero) return SampleResult.NoData;
         IntPtr memDC = IntPtr.Zero;
         IntPtr bitmap = IntPtr.Zero;
         IntPtr oldBitmap = IntPtr.Zero;
         try
         {
             memDC = CreateCompatibleDC(windowDC);
-            if (memDC == IntPtr.Zero) return false;
+            if (memDC == IntPtr.Zero) return SampleResult.NoData;
             bitmap = CreateCompatibleBitmap(windowDC, w, h);
-            if (bitmap == IntPtr.Zero) return false;
+            if (bitmap == IntPtr.Zero) return SampleResult.NoData;
             oldBitmap = SelectObject(memDC, bitmap);
 
             // PW_RENDERFULLCONTENT forces hardware-rendered windows (D3D11 etc.)
@@ -232,29 +261,22 @@ public sealed class PfSignalReader : IDisposable
             // the title bar so the sample fractions match the shader's
             // screen-space coords.
             if (!PrintWindow(_vrchatHwnd, memDC, PW_CLIENTONLY | PW_RENDERFULLCONTENT))
-                return false;
+                return SampleResult.NoData;
 
-            // GDI returns sRGB-encoded bytes (the swap chain stores Unity's
-            // gamma-corrected output). Decode to linear so the average and
-            // the decoder thresholds are in the same space as the FP16 path.
-            double rl = 0, gl = 0, bl = 0;
-            int n = 0;
-            for (int dy = -SampleRegion / 2; dy < SampleRegion / 2; dy++)
-            for (int dx = -SampleRegion / 2; dx < SampleRegion / 2; dx++)
+            var black = SampleGdi(memDC, w, h, FinderBlackX, FinderBlackY);
+            var white = SampleGdi(memDC, w, h, FinderWhiteX, FinderWhiteY);
+            if (black is null || white is null) return SampleResult.NoData;
+            if (!ValidateFinders(black.Value, white.Value))
             {
-                uint c = GetPixel(memDC, sx + dx, sy + dy);
-                if (c == 0xFFFFFFFFu) continue; // CLR_INVALID
-                rl += SrgbToLinear(((byte)( c        & 0xFF)) / 255.0);
-                gl += SrgbToLinear(((byte)((c >>  8) & 0xFF)) / 255.0);
-                bl += SrgbToLinear(((byte)((c >> 16) & 0xFF)) / 255.0);
-                n++;
+                NoteFinderState(false, black.Value, white.Value);
+                sample = PfSignalSample.None;
+                return SampleResult.NoLock;
             }
-            if (n == 0) return false;
-            sample = new PfSignalSample(
-                (byte)Math.Clamp(Math.Round(rl / n * 255.0), 0, 255),
-                (byte)Math.Clamp(Math.Round(gl / n * 255.0), 0, 255),
-                (byte)Math.Clamp(Math.Round(bl / n * 255.0), 0, 255));
-            return true;
+            NoteFinderState(true, black.Value, white.Value);
+            var signal = SampleGdi(memDC, w, h, SamplePointX, SamplePointY);
+            if (signal is null) return SampleResult.NoData;
+            sample = signal.Value;
+            return SampleResult.Locked;
         }
         finally
         {
@@ -263,6 +285,35 @@ public sealed class PfSignalReader : IDisposable
             if (memDC != IntPtr.Zero) DeleteDC(memDC);
             ReleaseDC(_vrchatHwnd, windowDC);
         }
+    }
+
+    /// <summary>GDI 4x4 sample at fractional (fx, fy). Returns null if no
+    /// valid pixels read (whole region was CLR_INVALID). sRGB-decodes each
+    /// byte before averaging so the result is in linear space.</summary>
+    private static PfSignalSample? SampleGdi(IntPtr memDC, int w, int h, float fx, float fy)
+    {
+        int sx = (int)(w * fx);
+        int sy = (int)(h * fy);
+        sx = Math.Clamp(sx, SampleRegion / 2, w - SampleRegion / 2 - 1);
+        sy = Math.Clamp(sy, SampleRegion / 2, h - SampleRegion / 2 - 1);
+
+        double rl = 0, gl = 0, bl = 0;
+        int n = 0;
+        for (int dy = -SampleRegion / 2; dy < SampleRegion / 2; dy++)
+        for (int dx = -SampleRegion / 2; dx < SampleRegion / 2; dx++)
+        {
+            uint c = GetPixel(memDC, sx + dx, sy + dy);
+            if (c == 0xFFFFFFFFu) continue;
+            rl += SrgbToLinear(((byte)( c        & 0xFF)) / 255.0);
+            gl += SrgbToLinear(((byte)((c >>  8) & 0xFF)) / 255.0);
+            bl += SrgbToLinear(((byte)((c >> 16) & 0xFF)) / 255.0);
+            n++;
+        }
+        if (n == 0) return null;
+        return new PfSignalSample(
+            (byte)Math.Clamp(Math.Round(rl / n * 255.0), 0, 255),
+            (byte)Math.Clamp(Math.Round(gl / n * 255.0), 0, 255),
+            (byte)Math.Clamp(Math.Round(bl / n * 255.0), 0, 255));
     }
 
     // -------- shared loop / staging / averaging -----------------------------
@@ -297,27 +348,39 @@ public sealed class PfSignalReader : IDisposable
                     PickBestBackend();
                 }
 
-                bool ok = ActiveBackend switch
+                PfSignalSample s = PfSignalSample.None;
+                SampleResult res = ActiveBackend switch
                 {
-                    CaptureBackend.OpenVrMirror       => TrySampleOpenVR(out var s) && Handle(s),
-                    CaptureBackend.WindowCapture     => TrySampleWindow(out var s2) && Handle(s2),
-                    _ => false,
+                    CaptureBackend.OpenVrMirror  => TrySampleOpenVR(out s),
+                    CaptureBackend.WindowCapture => TrySampleWindow(out s),
+                    _ => SampleResult.NoData,
                 };
 
-                if (ok) consecutiveFailures = 0;
-                else
+                switch (res)
                 {
-                    consecutiveFailures++;
-                    // ~1s of failures on an active backend → drop it so the
-                    // next backend check can re-init from scratch (handles
-                    // VRChat closing, SteamVR exit, etc.).
-                    if (consecutiveFailures >= 25 && ActiveBackend != CaptureBackend.None)
-                    {
-                        Logf($"PF: {ActiveBackend} stopped delivering frames. Re-probing …");
-                        DropCurrentBackend();
-                        nextBackendCheck = DateTime.MinValue;
+                    case SampleResult.Locked:
+                        Handle(s);
                         consecutiveFailures = 0;
-                    }
+                        break;
+                    case SampleResult.NoLock:
+                        // Backend is alive, the PFSignal quad just isn't in
+                        // view at the moment. Don't reset the backend; the
+                        // last propagated state holds via ControlService.
+                        consecutiveFailures = 0;
+                        break;
+                    default: // NoData
+                        consecutiveFailures++;
+                        // ~1s of failures on an active backend → drop it so
+                        // the next backend check can re-init from scratch
+                        // (handles VRChat closing, SteamVR exit, etc.).
+                        if (consecutiveFailures >= 25 && ActiveBackend != CaptureBackend.None)
+                        {
+                            Logf($"PF: {ActiveBackend} stopped delivering frames. Re-probing …");
+                            DropCurrentBackend();
+                            nextBackendCheck = DateTime.MinValue;
+                            consecutiveFailures = 0;
+                        }
+                        break;
                 }
             }
             catch (Exception ex)
@@ -412,14 +475,16 @@ public sealed class PfSignalReader : IDisposable
         ActiveBackend = CaptureBackend.None;
     }
 
-    private bool Handle(PfSignalSample sample)
+    /// <summary>Forward every locked sample to subscribers — even when the
+    /// raw bytes are byte-identical to the previous frame. The downstream
+    /// temporal smoothing in ControlService needs to see consecutive frames
+    /// to accumulate stability count; deduping at this layer would mean a
+    /// perfectly steady scene never advances the count past 1 and the
+    /// resolver never reaches the stable threshold.</summary>
+    private void Handle(PfSignalSample sample)
     {
-        if (sample != _last)
-        {
-            _last = sample;
-            SignalChanged?.Invoke(this, sample);
-        }
-        return true;
+        _last = sample;
+        SignalChanged?.Invoke(this, sample);
     }
 
     private void EnsureStaging(Texture2DDescription sourceDesc)
@@ -444,6 +509,37 @@ public sealed class PfSignalReader : IDisposable
             CPUAccessFlags = CpuAccessFlags.Read,
             MiscFlags = ResourceOptionFlags.None,
         });
+    }
+
+    /// <summary>Sample a 4x4 average at the fractional screen position
+    /// (fx, fy) on the mapped staging texture. Clamps to valid bounds so a
+    /// near-edge fraction (the white finder lives at y=0.97) never reads
+    /// past the texture.</summary>
+    private static PfSignalSample SampleAtFraction(MappedSubresource map, Format format, int width, int height, float fx, float fy)
+    {
+        int sx = Math.Clamp((int)(width  * fx) - SampleRegion / 2, 0, width  - SampleRegion);
+        int sy = Math.Clamp((int)(height * fy) - SampleRegion / 2, 0, height - SampleRegion);
+        return AveragePixel(map, format, sx, sy);
+    }
+
+    /// <summary>True if the two finder pixels look like the PFSignal black
+    /// (top centre) and white (bottom centre) blocks. When this is false
+    /// the world-origin PFSignal quad is not currently rendering into the
+    /// eye buffer at the expected screen positions, so any value at the
+    /// signal pixel is scene content, not a level cue.</summary>
+    private static bool ValidateFinders(PfSignalSample black, PfSignalSample white) =>
+        black.R <= FinderBlackMax && black.G <= FinderBlackMax && black.B <= FinderBlackMax &&
+        white.R >= FinderWhiteMin && white.G >= FinderWhiteMin && white.B >= FinderWhiteMin;
+
+    /// <summary>Edge-trigger log on finder visibility transitions so the
+    /// user knows why the level might not be updating, but without spamming
+    /// the log on every frame.</summary>
+    private void NoteFinderState(bool valid, PfSignalSample black, PfSignalSample white)
+    {
+        if (valid == _lastFinderState) return;
+        _lastFinderState = valid;
+        if (valid) Logf($"PF: finders detected, signal lock acquired (black={black}, white={white}).");
+        else       Logf($"PF: finders lost — PFSignal quad not in view (black={black}, white={white}). Level held until lock returns.");
     }
 
     /// <summary>
