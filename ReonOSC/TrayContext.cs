@@ -1,3 +1,4 @@
+using System.IO;
 using ReonOSC.Ble;
 using ReonOSC.Models;
 using ReonOSC.Services;
@@ -18,16 +19,35 @@ public sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon _tray;
     private readonly StatusIcons _icons = new();
 
+    // Boot trace — writes one line per phase to %APPDATA%\reon\bootlog.txt so a
+    // silent "no tray icon, no error" startup can be diagnosed without a debugger.
+    // Each phase entry runs through Trace() which catches all I/O exceptions.
+    private static readonly string BootLogPath = Path.Combine(Settings.ConfigDir, "bootlog.txt");
+    private static void Trace(string phase)
+    {
+        try
+        {
+            Directory.CreateDirectory(Settings.ConfigDir);
+            File.AppendAllText(BootLogPath,
+                $"{DateTime.Now:HH:mm:ss.fff} [tid {Environment.CurrentManagedThreadId}] {phase}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
     public TrayContext()
     {
+        Trace("--- TrayContext ctor begin ---");
         _settings = Settings.Load();
+        Trace($"settings loaded (oscPort={_settings.OscPort} startMin={_settings.StartMinimised} mqtt={_settings.MqttEnabled})");
         _service = new ControlService(_settings);
+        Trace("ControlService constructed");
         // Construct MQTT defensively: a broken MQTTnet load on a host without
         // the DLL alongside the exe must NOT prevent the tray icon from coming
         // up. The bridge tolerates a null publisher.
-        try { _mqtt = new MqttPublisher(_service, _settings); }
-        catch (Exception ex) { Console.Error.WriteLine($"MQTT init failed: {ex.Message}"); _mqtt = null; }
+        try { _mqtt = new MqttPublisher(_service, _settings); Trace("MqttPublisher constructed"); }
+        catch (Exception ex) { Trace($"MQTT init failed: {ex.GetType().Name}: {ex.Message}"); _mqtt = null; }
         _form = new MainForm(_service, _settings, _icons, _mqtt);
+        Trace("MainForm constructed");
 
         var menu = new ContextMenuStrip();
         var showItem = new ToolStripMenuItem("Show window") { Font = new Font(menu.Font, FontStyle.Bold) };
@@ -44,6 +64,7 @@ public sealed class TrayContext : ApplicationContext
         exitItem.Click += (_, _) => ExitThread();
         menu.Items.Add(exitItem);
 
+        Trace("Building NotifyIcon");
         _tray = new NotifyIcon
         {
             Icon = _icons.For(IconState.Off),
@@ -51,6 +72,7 @@ public sealed class TrayContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = menu,
         };
+        Trace($"NotifyIcon visible={_tray.Visible} hasIcon={_tray.Icon != null}");
         _tray.DoubleClick += (_, _) => ShowForm();
 
         // Reflect device state in the tray icon and tooltip.
@@ -72,7 +94,8 @@ public sealed class TrayContext : ApplicationContext
 
         // Ensure the form handle exists even if we never show the window, so
         // the WebView2 can initialise and log events have somewhere to land.
-        _ = _form.Handle;
+        try { _ = _form.Handle; Trace("form handle realized"); }
+        catch (Exception ex) { Trace($"form handle FAILED: {ex.GetType().Name}: {ex.Message}"); }
 
         // OSC listener always starts on boot. Sanity-check the port first so a
         // bad persisted value doesn't leave the listener silent forever.
@@ -81,21 +104,25 @@ public sealed class TrayContext : ApplicationContext
             _settings.OscPort = 9001;
             try { _settings.Save(); } catch { }
         }
-        try { _service.StartOsc(); } catch { /* surfaced via bridge log */ }
+        try { _service.StartOsc(); Trace("OSC start kicked"); }
+        catch (Exception ex) { Trace($"OSC start FAILED: {ex.GetType().Name}: {ex.Message}"); }
         if (_settings.EnablePfSignalHook)
         {
-            try { _service.PfSignal.Start(); } catch { /* surfaced via bridge log */ }
+            try { _service.PfSignal.Start(); Trace("PfSignal start kicked"); }
+            catch (Exception ex) { Trace($"PfSignal start FAILED: {ex.GetType().Name}: {ex.Message}"); }
         }
         // MQTT publisher autostarts only when the user has configured a broker
         // and toggled it on. Failures land in the GUI log via the bridge.
         if (_mqtt is not null)
         {
-            try { _ = _mqtt.StartAsync(); }
-            catch (Exception ex) { Console.Error.WriteLine($"MQTT start failed: {ex.Message}"); }
+            try { _ = _mqtt.StartAsync(); Trace("MQTT start kicked"); }
+            catch (Exception ex) { Trace($"MQTT start FAILED: {ex.GetType().Name}: {ex.Message}"); }
         }
 
+        Trace($"deciding ShowForm — StartMinimised={_settings.StartMinimised}");
         if (!_settings.StartMinimised)
             ShowForm();
+        Trace("--- TrayContext ctor end ---");
 
         // Auto-connect is now triggered by the bridge when the UI signals
         // ui.ready (see WebViewBridge.OnUiReady).
