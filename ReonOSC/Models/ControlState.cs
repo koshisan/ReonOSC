@@ -95,16 +95,20 @@ public static class ControlResolver
     }
 
     /// <summary>
-    /// Map a 0..1 float to wire level 0..3 by quartile, with 0.0 (exactly) acting
-    /// as a dead zone returning null (no contribution from this source).
+    /// Map a 0..1 float to wire level 1..4 by quartile, with 0.0 (exactly) acting
+    /// as a dead zone returning null (no contribution from this source). Each
+    /// quartile that's actually non-zero claims at least L1 — the previous
+    /// scheme returned L0 for (0, 0.25] which contributed nothing to the
+    /// resolver's max-pick and made small float inputs silently inert. The
+    /// per-direction cap clamp happens later in <see cref="ControlService.ResolveTarget"/>.
     /// </summary>
     public static int? FloatToLevel(float v)
     {
-        if (v <= 0f) return null;
-        if (v <= 0.25f) return 0;
-        if (v <= 0.50f) return 1;
-        if (v <= 0.75f) return 2;
-        return 3;
+        if (v <= 0f)    return null;
+        if (v <= 0.25f) return 1;
+        if (v <= 0.50f) return 2;
+        if (v <= 0.75f) return 3;
+        return 4;
     }
 
     private static int ClampLevel(int level) =>

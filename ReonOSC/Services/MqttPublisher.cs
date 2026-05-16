@@ -376,9 +376,10 @@ public sealed class MqttPublisher : IAsyncDisposable
             device,
         }).ConfigureAwait(false);
 
-        // Wind is the headline passthrough use case. Sender emits a bool
-        // (avatar is or isn't in a wind zone), so a binary_sensor is the
-        // idiomatic HA entity — a fan automation just keys off ON/OFF.
+        // OSC inputs as their own first-class HA entities so automations
+        // can fan out — drive a real AC off cold, a fan off wind, a heater
+        // off heat, etc., independent of whether the Reon is paired.
+        // Bools as binary_sensors, floats as 0..1 measurements.
         await PublishDiscoveryEntityAsync("binary_sensor", "wind", new
         {
             name = "Reon wind input",
@@ -386,6 +387,52 @@ public sealed class MqttPublisher : IAsyncDisposable
             state_topic = stateTopic,
             value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.wind) else 'OFF' }}",
             icon = "mdi:weather-windy",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        await PublishDiscoveryEntityAsync("binary_sensor", "water", new
+        {
+            name = "Reon water input",
+            unique_id = "reonosc_water",
+            state_topic = stateTopic,
+            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.water) else 'OFF' }}",
+            icon = "mdi:water",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        await PublishDiscoveryEntityAsync("binary_sensor", "pfhothigh", new
+        {
+            name = "Reon PFHotHigh input",
+            unique_id = "reonosc_pfhothigh",
+            state_topic = stateTopic,
+            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.pfHotHigh) else 'OFF' }}",
+            icon = "mdi:hand-back-right",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        await PublishDiscoveryEntityAsync("sensor", "cold", new
+        {
+            name = "Reon cold input",
+            unique_id = "reonosc_cold",
+            state_topic = stateTopic,
+            value_template = "{{ value_json.inputs.cold if value_json.inputs else 0 }}",
+            icon = "mdi:snowflake",
+            state_class = "measurement",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        await PublishDiscoveryEntityAsync("sensor", "heat", new
+        {
+            name = "Reon heat input",
+            unique_id = "reonosc_heat",
+            state_topic = stateTopic,
+            value_template = "{{ value_json.inputs.heat if value_json.inputs else 0 }}",
+            icon = "mdi:fire",
+            state_class = "measurement",
             availability_topic = availabilityTopic,
             device,
         }).ConfigureAwait(false);

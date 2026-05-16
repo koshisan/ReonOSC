@@ -51,6 +51,18 @@ public sealed class ControlService : IAsyncDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly TimeSpan _minWriteGap = TimeSpan.FromMilliseconds(120);
 
+    // PF freshness — when SignalChanged stops firing (VRChat closed, world
+    // switching, window/HMD not grabbable…) we'd otherwise be stuck on the
+    // last decoded _pfState forever, which would also keep blocking the OSC
+    // fallback in the resolver. Mark PF as stale once we go this long without
+    // a confirmed locked sample.
+    private DateTime _pfLastUpdateUtc = DateTime.MinValue;
+    private static readonly TimeSpan PfFreshnessWindow = TimeSpan.FromSeconds(5);
+    // Periodic reconcile so PF expiry can actually fire even when no other
+    // event wakes the resolver (no OSC traffic, no manual toggling). Cheap:
+    // ResolveTarget is a pure function over a few cached fields.
+    private readonly System.Threading.Timer _periodicReconcile;
+
     public ControlService(Settings settings)
     {
         Settings = settings;
@@ -74,6 +86,11 @@ public sealed class ControlService : IAsyncDisposable
         // user as a half-second hiccup.
         PfSignal.SignalChanged += (_, sample) =>
         {
+            // Mark PF data fresh on every locked sample; the resolver's
+            // staleness check uses this to fall back to OSC if the reader
+            // stops delivering (window unreachable, world switching, …).
+            _pfLastUpdateUtc = DateTime.UtcNow;
+
             var next = PfSignalDecoder.Decode(sample);
             if (next == _pfCandidate)
             {
@@ -94,6 +111,12 @@ public sealed class ControlService : IAsyncDisposable
                 _ = ReconcileAsync();
             }
         };
+
+        // 1 Hz reconcile beat so freshness expiry actually fires when no
+        // other event is around to wake the resolver.
+        _periodicReconcile = new System.Threading.Timer(
+            _ => { try { _ = ReconcileAsync(); } catch { } },
+            null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
     private PfThermalState _pfState = PfThermalState.Off;
@@ -110,6 +133,7 @@ public sealed class ControlService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        try { _periodicReconcile.Dispose(); } catch { }
         Osc.Dispose();
         PfSignal.Dispose();
         await Reon.DisposeAsync().ConfigureAwait(false);
@@ -266,7 +290,12 @@ public sealed class ControlService : IAsyncDisposable
     {
         if (ManualOverride) return (ManualCommand, "Manual", "Manual");
 
-        if (_pfState.Mode != PfThermalMode.Off)
+        // PF path only wins when we have a non-Off decoded state AND we've
+        // seen a locked sample recently. Otherwise (VRChat closed, world
+        // switching, mirror not deliverable, …) we'd be stuck on the last
+        // valid reading forever, which would also lock out OSC fallback.
+        bool pfFresh = (DateTime.UtcNow - _pfLastUpdateUtc) < PfFreshnessWindow;
+        if (_pfState.Mode != PfThermalMode.Off && pfFresh)
         {
             var mode = _pfState.Mode == PfThermalMode.Hot ? ReonProtocol.Mode.Heat : ReonProtocol.Mode.Cool;
             var caps = Reon.Capabilities;
@@ -276,6 +305,16 @@ public sealed class ControlService : IAsyncDisposable
         }
 
         var (cmd, oscReason) = ControlResolver.Resolve(_inputs, Settings);
+        // Clamp the OSC-resolved level to the connected device's per-direction
+        // cap (PF path already does this above). A heat=1.0 float maps to L4
+        // but an RNP-3 only supports up to L3; without clamping the BLE write
+        // would either be rejected or silently truncated.
+        if (cmd.Mode != ReonProtocol.Mode.Stop)
+        {
+            var caps = Reon.Capabilities;
+            var max = cmd.Mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
+            cmd = new ResolvedCommand(cmd.Mode, Math.Clamp(cmd.Level, 0, max));
+        }
         return (cmd, "OSC", oscReason);
     }
 
