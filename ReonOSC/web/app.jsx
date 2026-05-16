@@ -219,6 +219,7 @@ function App() {
     water: "/ChairOSC/v1/water",
     cold: "/ChairOSC/v1/cold",
     heat: "/ChairOSC/v1/heat",
+    wind: "/ChairOSC/v1/wind",
   });
 
   // Manual control
@@ -246,7 +247,7 @@ function App() {
   const [mqttState, setMqttState] = useState({ state: "Disabled", error: null });
 
   // Incoming OSC inputs
-  const [oscIn, setOscIn] = useState({ PFHotHigh: 0, water: 0, cold: 0.0, heat: 0.0 });
+  const [oscIn, setOscIn] = useState({ PFHotHigh: 0, water: 0, cold: 0.0, heat: 0.0, wind: 0.0 });
 
   // Live derived state pushed by backend
   const [currentMode, setCurrentMode] = useState("Stop");
@@ -327,6 +328,7 @@ function App() {
           water: p.water ?? 0,
           cold: p.cold ?? 0,
           heat: p.heat ?? 0,
+          wind: p.wind ?? 0,
         });
       }),
 
@@ -460,7 +462,7 @@ function App() {
     if (hosted || !oscRunning || connState !== "connected") return;
     const id = setInterval(() => {
       if (Math.random() < 0.08) {
-        const which = ["PFHotHigh", "water", "cold", "heat"][Math.floor(Math.random() * 4)];
+        const which = ["PFHotHigh", "water", "cold", "heat", "wind"][Math.floor(Math.random() * 5)];
         setOscIn((o) => {
           const next = { ...o };
           if (which === "PFHotHigh" || which === "water") next[which] = next[which] ? 0 : 1;
@@ -604,11 +606,14 @@ function App() {
                 </div>
 
                 {/* PFHotHigh is intentionally NOT exposed here — its address is
-                    fixed for backward compatibility with the Pebble Feel sender. */}
+                    fixed for backward compatibility with the Pebble Feel sender.
+                    Wind doesn't drive the Reon (no fan) but is forwarded to
+                    MQTT so HA automations can react. */}
                 {[
                   { key: "water",     label: "water",     type: "bool" },
                   { key: "cold",      label: "cold",      type: "float" },
                   { key: "heat",      label: "heat",      type: "float" },
+                  { key: "wind",      label: "wind",      type: "float" },
                 ].map((row) => (
                   <div className="osc-row" key={row.key}>
                     <span className="osc-label">{row.label} <span className={`tag ${row.type}`}>{row.type}</span></span>
@@ -994,6 +999,7 @@ function App() {
                 { k: "water",     v: oscIn.water,     fmt: (v) => v },
                 { k: "cold",      v: oscIn.cold,      fmt: (v) => Number(v).toFixed(2) },
                 { k: "heat",      v: oscIn.heat,      fmt: (v) => Number(v).toFixed(2) },
+                { k: "wind",      v: oscIn.wind,      fmt: (v) => Number(v).toFixed(2) },
               ].map((c) => (
                 <div className="osc-readout-cell" key={c.k}>
                   <div className="osc-readout-label">{c.k}</div>

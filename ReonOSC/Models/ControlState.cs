@@ -1,12 +1,14 @@
 namespace ReonOSC.Models;
 
-/// <summary>The four OSC-driven input sources, each with a value and a timestamp.</summary>
-public enum InputSource { PfHotHigh, Water, Cold, Heat }
+/// <summary>The OSC-driven input sources, each with a value and a timestamp.
+/// Wind is forwarded to MQTT but is NOT consulted by the Reon resolver — the
+/// device has no fan, so wind is purely passthrough.</summary>
+public enum InputSource { PfHotHigh, Water, Cold, Heat, Wind }
 
 public sealed class OscInputs
 {
-    private readonly float[] _values = new float[4];
-    private readonly DateTime[] _changedAt = new DateTime[4];
+    private readonly float[] _values = new float[5];
+    private readonly DateTime[] _changedAt = new DateTime[5];
 
     public float Get(InputSource src) => _values[(int)src];
 

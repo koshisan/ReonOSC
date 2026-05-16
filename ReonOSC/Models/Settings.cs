@@ -39,6 +39,10 @@ public sealed class Settings
     public string AddrWater     { get; set; } = "/ChairOSC/v1/water";
     public string AddrCold      { get; set; } = "/ChairOSC/v1/cold";
     public string AddrHeat      { get; set; } = "/ChairOSC/v1/heat";
+    /// <summary>Wind isn't actionable by the Reon (no fan) but it's a useful
+    /// environmental signal to forward to Home Assistant via MQTT so the
+    /// user can drive a physical fan off it.</summary>
+    public string AddrWind      { get; set; } = "/ChairOSC/v1/wind";
 
     // MQTT publish — pushes the current state (mode/level/source, connection,
     // telemetry) to a broker so Home Assistant can mirror the device and react

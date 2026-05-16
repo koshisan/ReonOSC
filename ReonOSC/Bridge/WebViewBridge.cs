@@ -190,6 +190,7 @@ public sealed class WebViewBridge : IDisposable
                 water = _settings.AddrWater,
                 cold = _settings.AddrCold,
                 heat = _settings.AddrHeat,
+                wind = _settings.AddrWind,
             },
             heatTouchLevel = _settings.HeatTouchLevel,
             coldWaterLevel = _settings.ColdWaterLevel,
@@ -424,6 +425,7 @@ public sealed class WebViewBridge : IDisposable
             case "water":     _settings.AddrWater     = addr; break;
             case "cold":      _settings.AddrCold      = addr; break;
             case "heat":      _settings.AddrHeat      = addr; break;
+            case "wind":      _settings.AddrWind      = addr; break;
             default: return;
         }
         _settings.Save();
@@ -635,6 +637,7 @@ public sealed class WebViewBridge : IDisposable
             water = snapshot.GetValueOrDefault("water"),
             cold = snapshot.GetValueOrDefault("cold"),
             heat = snapshot.GetValueOrDefault("heat"),
+            wind = snapshot.GetValueOrDefault("wind"),
         });
     }
 

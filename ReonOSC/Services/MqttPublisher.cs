@@ -73,6 +73,10 @@ public sealed class MqttPublisher : IAsyncDisposable
             // (OSC:PFHotHigh) right after a fire (PFSignal) wouldn't update the
             // reason topic if both happened to resolve to the same Heat L3.
             _service.StateChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            // InputsChanged catches passthrough values (notably wind) that
+            // don't influence the resolver — the Reon has no fan, but HA
+            // should still see the value change so a real fan can react.
+            _service.InputsChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
             _service.Reon.TelemetryReceived += (_, t) =>
             {
                 _lastTelemetry = t;
@@ -231,6 +235,7 @@ public sealed class MqttPublisher : IAsyncDisposable
             ReonProtocol.Mode.Heat => "Heat",
             _ => "Stop",
         };
+        var inputs = _service.Snapshot();
         return new
         {
             mode,
@@ -248,6 +253,17 @@ public sealed class MqttPublisher : IAsyncDisposable
             {
                 plate = tel.SkinPlate, sink = tel.Heatsink, board = tel.Board, ambient = tel.Ambient,
             } : null,
+            // Pass-through of the raw environmental OSC values. Wind in
+            // particular is captured here for HA to drive a fan off — the
+            // Reon itself can't act on it.
+            inputs = new
+            {
+                pfHotHigh = inputs.GetValueOrDefault("PFHotHigh"),
+                water = inputs.GetValueOrDefault("water"),
+                cold = inputs.GetValueOrDefault("cold"),
+                heat = inputs.GetValueOrDefault("heat"),
+                wind = inputs.GetValueOrDefault("wind"),
+            },
             timestamp = DateTime.UtcNow.ToString("o"),
         };
     }
@@ -350,6 +366,20 @@ public sealed class MqttPublisher : IAsyncDisposable
             value_template = "{{ value_json.temps.ambient if value_json.temps else none }}",
             unit_of_measurement = "°C",
             device_class = "temperature",
+            state_class = "measurement",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        // Wind is the headline passthrough use case — exposed as a 0..1
+        // sensor so a HA automation can map it to a physical fan's speed.
+        await PublishDiscoveryEntityAsync("sensor", "wind", new
+        {
+            name = "Reon wind input",
+            unique_id = "reonosc_wind",
+            state_topic = stateTopic,
+            value_template = "{{ value_json.inputs.wind if value_json.inputs else 0 }}",
+            icon = "mdi:weather-windy",
             state_class = "measurement",
             availability_topic = availabilityTopic,
             device,

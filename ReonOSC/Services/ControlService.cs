@@ -190,6 +190,12 @@ public sealed class ControlService : IAsyncDisposable
         {
             if (msg.TryGetFloat(0, out var f)) UpdateInput(InputSource.Heat, Math.Clamp(f, 0f, 1f));
         }
+        else if (MatchAddress(addr, Settings.AddrWind))
+        {
+            // Wind doesn't influence the Reon (no fan in the device); we just
+            // snapshot it so the bridge + MQTT can forward to HA / a fan.
+            if (msg.TryGetFloat(0, out var f)) UpdateInput(InputSource.Wind, Math.Clamp(f, 0f, 1f));
+        }
         // Unmatched addresses are intentionally silent — the packet counter
         // above proves the pipe works, and the OSC inputs panel in the GUI
         // surfaces matched values directly.
@@ -240,6 +246,7 @@ public sealed class ControlService : IAsyncDisposable
         ["water"]     = _inputs.Get(InputSource.Water),
         ["cold"]      = _inputs.Get(InputSource.Cold),
         ["heat"]      = _inputs.Get(InputSource.Heat),
+        ["wind"]      = _inputs.Get(InputSource.Wind),
     };
 
     /// <summary>
