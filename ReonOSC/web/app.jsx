@@ -465,7 +465,7 @@ function App() {
         const which = ["PFHotHigh", "water", "cold", "heat", "wind"][Math.floor(Math.random() * 5)];
         setOscIn((o) => {
           const next = { ...o };
-          if (which === "PFHotHigh" || which === "water") next[which] = next[which] ? 0 : 1;
+          if (which === "PFHotHigh" || which === "water" || which === "wind") next[which] = next[which] ? 0 : 1;
           else next[which] = Math.random() < 0.4 ? 0 : Math.round(Math.random() * 100) / 100;
           return next;
         });
@@ -613,7 +613,7 @@ function App() {
                   { key: "water",     label: "water",     type: "bool" },
                   { key: "cold",      label: "cold",      type: "float" },
                   { key: "heat",      label: "heat",      type: "float" },
-                  { key: "wind",      label: "wind",      type: "float" },
+                  { key: "wind",      label: "wind",      type: "bool" },
                 ].map((row) => (
                   <div className="osc-row" key={row.key}>
                     <span className="osc-label">{row.label} <span className={`tag ${row.type}`}>{row.type}</span></span>
@@ -999,7 +999,7 @@ function App() {
                 { k: "water",     v: oscIn.water,     fmt: (v) => v },
                 { k: "cold",      v: oscIn.cold,      fmt: (v) => Number(v).toFixed(2) },
                 { k: "heat",      v: oscIn.heat,      fmt: (v) => Number(v).toFixed(2) },
-                { k: "wind",      v: oscIn.wind,      fmt: (v) => Number(v).toFixed(2) },
+                { k: "wind",      v: oscIn.wind,      fmt: (v) => v },
               ].map((c) => (
                 <div className="osc-readout-cell" key={c.k}>
                   <div className="osc-readout-label">{c.k}</div>

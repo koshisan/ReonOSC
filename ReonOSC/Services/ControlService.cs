@@ -194,7 +194,8 @@ public sealed class ControlService : IAsyncDisposable
         {
             // Wind doesn't influence the Reon (no fan in the device); we just
             // snapshot it so the bridge + MQTT can forward to HA / a fan.
-            if (msg.TryGetFloat(0, out var f)) UpdateInput(InputSource.Wind, Math.Clamp(f, 0f, 1f));
+            // Sender emits a bool (on/off zone) — store as 0 or 1.
+            if (msg.TryGetBool(0, out var b)) UpdateInput(InputSource.Wind, b ? 1f : 0f);
         }
         // Unmatched addresses are intentionally silent — the packet counter
         // above proves the pipe works, and the OSC inputs panel in the GUI

@@ -371,16 +371,16 @@ public sealed class MqttPublisher : IAsyncDisposable
             device,
         }).ConfigureAwait(false);
 
-        // Wind is the headline passthrough use case — exposed as a 0..1
-        // sensor so a HA automation can map it to a physical fan's speed.
-        await PublishDiscoveryEntityAsync("sensor", "wind", new
+        // Wind is the headline passthrough use case. Sender emits a bool
+        // (avatar is or isn't in a wind zone), so a binary_sensor is the
+        // idiomatic HA entity — a fan automation just keys off ON/OFF.
+        await PublishDiscoveryEntityAsync("binary_sensor", "wind", new
         {
             name = "Reon wind input",
             unique_id = "reonosc_wind",
             state_topic = stateTopic,
-            value_template = "{{ value_json.inputs.wind if value_json.inputs else 0 }}",
+            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.wind) else 'OFF' }}",
             icon = "mdi:weather-windy",
-            state_class = "measurement",
             availability_topic = availabilityTopic,
             device,
         }).ConfigureAwait(false);
