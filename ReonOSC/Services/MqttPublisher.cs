@@ -376,10 +376,14 @@ public sealed class MqttPublisher : IAsyncDisposable
             device,
         }).ConfigureAwait(false);
 
-        // OSC inputs as their own first-class HA entities so automations
-        // can fan out — drive a real AC off cold, a fan off wind, a heater
-        // off heat, etc., independent of whether the Reon is paired.
-        // Bools as binary_sensors, floats as 0..1 measurements.
+        // OSC inputs as first-class HA entities. Wind stays as a binary
+        // sensor (sender emits a bool). Cold/heat are exposed BOTH as a
+        // 0..1 numeric sensor AND as a binary "active" sensor (ON when
+        // the float is > 0) so an automation can pick whichever shape
+        // fits — a fan curve off the numeric, a simple AC on/off off
+        // the binary. Water and PFHotHigh aren't exposed as their own
+        // entities (the user didn't ask for them and they're already in
+        // value_json.inputs for anyone who needs them).
         await PublishDiscoveryEntityAsync("binary_sensor", "wind", new
         {
             name = "Reon wind input",
@@ -387,28 +391,6 @@ public sealed class MqttPublisher : IAsyncDisposable
             state_topic = stateTopic,
             value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.wind) else 'OFF' }}",
             icon = "mdi:weather-windy",
-            availability_topic = availabilityTopic,
-            device,
-        }).ConfigureAwait(false);
-
-        await PublishDiscoveryEntityAsync("binary_sensor", "water", new
-        {
-            name = "Reon water input",
-            unique_id = "reonosc_water",
-            state_topic = stateTopic,
-            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.water) else 'OFF' }}",
-            icon = "mdi:water",
-            availability_topic = availabilityTopic,
-            device,
-        }).ConfigureAwait(false);
-
-        await PublishDiscoveryEntityAsync("binary_sensor", "pfhothigh", new
-        {
-            name = "Reon PFHotHigh input",
-            unique_id = "reonosc_pfhothigh",
-            state_topic = stateTopic,
-            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.pfHotHigh) else 'OFF' }}",
-            icon = "mdi:hand-back-right",
             availability_topic = availabilityTopic,
             device,
         }).ConfigureAwait(false);
@@ -425,6 +407,17 @@ public sealed class MqttPublisher : IAsyncDisposable
             device,
         }).ConfigureAwait(false);
 
+        await PublishDiscoveryEntityAsync("binary_sensor", "cold_active", new
+        {
+            name = "Reon cold active",
+            unique_id = "reonosc_cold_active",
+            state_topic = stateTopic,
+            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.cold > 0) else 'OFF' }}",
+            icon = "mdi:snowflake",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
         await PublishDiscoveryEntityAsync("sensor", "heat", new
         {
             name = "Reon heat input",
@@ -436,6 +429,31 @@ public sealed class MqttPublisher : IAsyncDisposable
             availability_topic = availabilityTopic,
             device,
         }).ConfigureAwait(false);
+
+        await PublishDiscoveryEntityAsync("binary_sensor", "heat_active", new
+        {
+            name = "Reon heat active",
+            unique_id = "reonosc_heat_active",
+            state_topic = stateTopic,
+            value_template = "{{ 'ON' if (value_json.inputs and value_json.inputs.heat > 0) else 'OFF' }}",
+            icon = "mdi:fire",
+            availability_topic = availabilityTopic,
+            device,
+        }).ConfigureAwait(false);
+
+        // Retire the entities published by previous builds so HA doesn't
+        // keep showing them as 'unavailable' indefinitely. An empty retained
+        // payload on a discovery topic tells HA to delete that entity.
+        await RetireDiscoveryEntityAsync("binary_sensor", "water").ConfigureAwait(false);
+        await RetireDiscoveryEntityAsync("binary_sensor", "pfhothigh").ConfigureAwait(false);
+    }
+
+    /// <summary>Tell HA to delete a previously-published discovery entity
+    /// by sending an empty retained payload to its config topic. Idempotent.</summary>
+    private Task RetireDiscoveryEntityAsync(string component, string objectId)
+    {
+        var topic = $"{_settings.MqttDiscoveryPrefix.TrimEnd('/')}/{component}/reonosc/{objectId}/config";
+        return PublishRawAsync(topic, "", retain: true);
     }
 
     private Task PublishDiscoveryEntityAsync(string component, string objectId, object payload)
