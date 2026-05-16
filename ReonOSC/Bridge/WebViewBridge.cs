@@ -246,8 +246,8 @@ public sealed class WebViewBridge : IDisposable
                 heatMax = _service.Reon.Capabilities.HeatLevelMax,
             },
         });
-        if (_service.LastSentCommand.Mode != ReonProtocol.Mode.Stop)
-            PushCurrent(_service.LastSentCommand, _service.LastCommandSource, _service.LastCommandReason);
+        if (_service.LastResolvedCommand.Mode != ReonProtocol.Mode.Stop)
+            PushCurrent(_service.LastResolvedCommand, _service.LastCommandSource, _service.LastCommandReason);
 
         // Push the current OSC inputs once so the GUI has a baseline reading.
         PushInputs(_service.Snapshot());

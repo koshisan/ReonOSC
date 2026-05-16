@@ -23,6 +23,12 @@ public sealed class ControlService : IAsyncDisposable
 
     public ResolvedCommand LastSentCommand { get; private set; } = ResolvedCommand.Stop;
     public DateTime LastSentAt { get; private set; }
+    /// <summary>What the resolver currently wants the device to be doing —
+    /// updates on every Reconcile regardless of whether the BLE write
+    /// actually happened. MQTT publishes this so HA sees the "intended"
+    /// state even when no Reon is paired; <see cref="LastSentCommand"/>
+    /// only reflects what physically got delivered.</summary>
+    public ResolvedCommand LastResolvedCommand { get; private set; } = ResolvedCommand.Stop;
     /// <summary>Which input source authored the last sent command — used by the
     /// GUI's SOURCE indicator. One of "Manual", "PF", "OSC".</summary>
     public string LastCommandSource { get; private set; } = "OSC";
@@ -275,40 +281,32 @@ public sealed class ControlService : IAsyncDisposable
 
     /// <summary>Resolve the current target and push it to the device if it
     /// differs from the last sent. Also fires <see cref="StateChanged"/>
-    /// whenever (cmd, source, reason) shifts — regardless of whether a BLE
-    /// write happened — so MQTT can publish reason changes even when the
-    /// device isn't connected.</summary>
+    /// whenever (resolved cmd, source, reason) shifts — regardless of
+    /// whether a BLE write happened — so MQTT can publish the resolver's
+    /// intent even when the device isn't connected.
+    ///
+    /// Two parallel trackers: <see cref="LastResolvedCommand"/> follows
+    /// the resolver's current intent (always up to date), while
+    /// <see cref="LastSentCommand"/> only updates on successful BLE write
+    /// — they diverge when the device is disconnected.</summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
     {
         var (target, source, reason) = ResolveTarget();
 
-        // Reason-only changes update the property and fire StateChanged even
-        // when the device is disconnected or the BLE write would be a no-op.
-        bool stateShifted = target != LastSentCommand
-                         || source != LastCommandSource
-                         || reason != LastCommandReason;
-
-        if (!Reon.IsConnected)
+        // Propagate resolver-intent changes to subscribers (MQTT + GUI)
+        // exactly once per actual transition, regardless of connection.
+        if (target != LastResolvedCommand || source != LastCommandSource || reason != LastCommandReason)
         {
-            if (stateShifted)
-            {
-                LastCommandReason = reason;
-                // Note: we deliberately do NOT update LastSentCommand/Source
-                // here — those track what the device actually received.
-                StateChanged?.Invoke(this, (target, source, reason));
-            }
-            return;
+            LastResolvedCommand = target;
+            LastCommandSource = source;
+            LastCommandReason = reason;
+            StateChanged?.Invoke(this, (target, source, reason));
         }
 
-        if (target == LastSentCommand && source == LastCommandSource)
-        {
-            if (reason != LastCommandReason)
-            {
-                LastCommandReason = reason;
-                StateChanged?.Invoke(this, (target, source, reason));
-            }
-            return;
-        }
+        if (!Reon.IsConnected) return;
+
+        // Device already matches resolved target — nothing to write.
+        if (target == LastSentCommand) return;
 
         if (!await _writeLock.WaitAsync(0, ct).ConfigureAwait(false)) return;
         try
@@ -320,15 +318,14 @@ public sealed class ControlService : IAsyncDisposable
 
             // re-evaluate after the wait so we don't send a stale target
             (target, source, reason) = ResolveTarget();
-            if (target == LastSentCommand && source == LastCommandSource)
+            if (target != LastResolvedCommand || source != LastCommandSource || reason != LastCommandReason)
             {
-                if (reason != LastCommandReason)
-                {
-                    LastCommandReason = reason;
-                    StateChanged?.Invoke(this, (target, source, reason));
-                }
-                return;
+                LastResolvedCommand = target;
+                LastCommandSource = source;
+                LastCommandReason = reason;
+                StateChanged?.Invoke(this, (target, source, reason));
             }
+            if (target == LastSentCommand) return;
 
             try
             {
@@ -340,10 +337,7 @@ public sealed class ControlService : IAsyncDisposable
                 }
                 LastSentCommand = target;
                 LastSentAt = DateTime.UtcNow;
-                LastCommandSource = source;
-                LastCommandReason = reason;
                 CommandSent?.Invoke(this, target);
-                StateChanged?.Invoke(this, (target, source, reason));
             }
             catch (Exception ex)
             {

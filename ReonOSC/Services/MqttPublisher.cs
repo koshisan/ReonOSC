@@ -228,7 +228,12 @@ public sealed class MqttPublisher : IAsyncDisposable
 
     private object BuildStatePayload()
     {
-        var cmd = _service.LastSentCommand;
+        // Use the resolver's intent rather than the last successful write —
+        // when no Reon is paired, LastSentCommand stays at its default and
+        // HA would otherwise see mode=Stop forever despite the user being
+        // in a heat zone. `connected` separately signals whether the Reon
+        // is actually applying these commands.
+        var cmd = _service.LastResolvedCommand;
         var mode = cmd.Mode switch
         {
             ReonProtocol.Mode.Cool => "Cool",
