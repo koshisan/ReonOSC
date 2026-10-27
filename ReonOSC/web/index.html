@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles-v3.css" />
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
@@ -34,7 +35,6 @@
       window.addEventListener('unhandledrejection', (e) => {
         show('[unhandled promise rejection]\n' + (e.reason && (e.reason.stack || e.reason.message) || e.reason));
       });
-      // If nothing rendered after 6s, dump a diagnostic.
       setTimeout(() => {
         if (document.getElementById('root') && !document.getElementById('root').firstChild) {
           show('[boot timeout — nothing rendered after 6s]\n' +
@@ -42,7 +42,7 @@
             'ReactDOM loaded: ' + !!window.ReactDOM + '\n' +
             'Babel loaded: ' + !!window.Babel + '\n' +
             'reonBridge loaded: ' + !!window.reonBridge + '\n' +
-            'ReonDevice loaded: ' + !!window.ReonDevice);
+            'BodyMap loaded: ' + !!window.BodyMap);
         }
       }, 6000);
     })();
@@ -51,20 +51,18 @@
   <!-- Theme: follow the OS unless the user has explicitly toggled (which writes
        reon.theme into localStorage). Done inline to avoid FOUC. -->
   <script>
-    window.__TWEAKS_DEFAULTS = { theme: "system", showSparkline: true };
     (function () {
       const saved = localStorage.getItem('reon.theme');
       const osDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
       const effective = (saved === 'dark' || saved === 'light') ? saved : (osDark ? 'dark' : 'light');
       document.documentElement.dataset.theme = effective;
-      // hint to the engine for native scrollbars / form controls
       document.documentElement.style.colorScheme = effective;
     })();
   </script>
 
   <!-- Bridge to the C# host (WebView2). Loaded before the React app. -->
   <script src="reon-bridge.js"></script>
-  <script type="text/babel" src="device.jsx"></script>
+  <script type="text/babel" src="bodymap.jsx"></script>
   <script type="text/babel" src="app.jsx"></script>
 </body>
 </html>
