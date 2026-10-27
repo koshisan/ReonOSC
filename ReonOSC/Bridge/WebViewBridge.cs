@@ -190,6 +190,7 @@ public sealed class WebViewBridge : IDisposable
             case "preset.heat":     PresetHeat(payload); break;
             case "preset.cold":     PresetCold(payload); break;
             case "socks.config":    _ = SocksConfig(payload); break;
+            case "socks.swap":      _ = SocksSwapAsync(); break;
             case "options.set":     SetOptions(payload); break;
             case "pfHook.toggle":   TogglePfHook(payload); break;
             case "pfSignal.capture": CapturePfSignal(payload); break;
@@ -662,6 +663,27 @@ public sealed class WebViewBridge : IDisposable
         if (sockChanged) _settings.Save();
 
         await _service.ReconcileAsync();
+    }
+
+    private async Task SocksSwapAsync()
+    {
+        try
+        {
+            await _service.SwapSocksAsync();
+            // Settings changed — re-echo so the UI's MAC fields stay in sync.
+            PushDeviceState("sockL",
+                _service.SockL.IsConnected ? "connected" :
+                _service.SockL.Address is not null ? "connecting" : "disconnected",
+                _settings.SockLMac);
+            PushDeviceState("sockR",
+                _service.SockR.IsConnected ? "connected" :
+                _service.SockR.Address is not null ? "connecting" : "disconnected",
+                _settings.SockRMac);
+        }
+        catch (Exception ex)
+        {
+            Push("log.line", new { t = Ts(), kind = "err", msg = $"Sock swap failed: {ex.Message}" });
+        }
     }
 
     private async Task SocksConfig(JsonElement payload)

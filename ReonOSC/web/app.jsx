@@ -47,6 +47,7 @@ const Icon = ({ name, size = 13 }) => {
     play: <path d="M6 4l12 8-12 8z" />,
     stop: <rect x="6" y="6" width="12" height="12" rx="1" />,
     trash: <path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />,
+    swap: <><path d="M7 7h12l-3-3M17 17H5l3 3" /></>,
   };
   return (
     <svg className="btn-icon" width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -254,6 +255,7 @@ function App() {
   const connect    = (id) => bridge.send("device.connect",    { id });
   const disconnect = (id) => bridge.send("device.disconnect", { id });
   const pair       = (id) => bridge.send("device.pair",       { id });
+  const swapSocks  = () => bridge.send("socks.swap");
 
   const toggleOsc = () => {
     if (oscRunning) bridge.send("osc.stop");
@@ -400,6 +402,15 @@ function App() {
                     </div>
                   );
                 })}
+              </div>
+              <div className="inline-bar sock-swap-bar">
+                <span className="dim">Left ↔ right mixed up?</span>
+                <button className="btn sm"
+                        onClick={swapSocks}
+                        disabled={!devices.sockL.mac && !devices.sockR.mac}
+                        title="Swap the paired MACs between L and R">
+                  <Icon name="swap" />Swap sock L ↔ R
+                </button>
               </div>
               <div className="group-title">Options</div>
               <div className="checks">

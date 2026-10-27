@@ -56,6 +56,7 @@ body{font-size:12.5px}
 .tbl .input{padding:4px 8px;font-size:11.5px}
 .input.port{width:84px;padding:4px 8px}
 .inline-bar{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.sock-swap-bar{margin-top:8px;margin-bottom:0}
 .group-title{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--text-muted);font-weight:600;margin:14px 0 4px}
 .checks{display:flex;flex-direction:column;gap:8px;padding:4px 0}
 .srow{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;align-items:center;min-height:38px;border-bottom:1px solid var(--border)}

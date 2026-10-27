@@ -473,4 +473,25 @@ public sealed class ControlService : IAsyncDisposable
     /// <summary>Release a sock's MAC binding and stop the auto-reconnect loop.</summary>
     public Task UnbindSockAsync(SockClient.Side side) =>
         (side == SockClient.Side.Left ? SockL : SockR).UnbindAsync();
+
+    /// <summary>Swap the active L and R bindings. The current MACs are
+    /// re-bound to the opposite foot in one go — the user hits this when the
+    /// pair-time L/R guess doesn't match the physical socks (which have no
+    /// marking and can't be told apart in VR). Updates settings before
+    /// re-binding so a crash in the middle still persists the swap.</summary>
+    public async Task SwapSocksAsync()
+    {
+        var oldL = SockL.Address;
+        var oldR = SockR.Address;
+        (Settings.SockLMac, Settings.SockRMac) = (Settings.SockRMac, Settings.SockLMac);
+        Settings.Save();
+
+        // Detach both before re-attaching so Windows doesn't end up holding
+        // two handles pointing at the same device for a moment.
+        await SockL.UnbindAsync().ConfigureAwait(false);
+        await SockR.UnbindAsync().ConfigureAwait(false);
+        if (oldR is ulong rAddr) await SockL.BindAsync(rAddr).ConfigureAwait(false);
+        if (oldL is ulong lAddr) await SockR.BindAsync(lAddr).ConfigureAwait(false);
+        Log?.Invoke(this, "Socks: swapped L ↔ R.");
+    }
 }
