@@ -43,6 +43,42 @@ public sealed class Settings
     /// environmental signal to forward to Home Assistant via MQTT so the
     /// user can drive a physical fan off it.</summary>
     public string AddrWind      { get; set; } = "/ChairOSC/v1/wind";
+    /// <summary>Per-foot touch inputs — only drive the socks, one each.</summary>
+    public string AddrTouchL    { get; set; } = "/ChairOSC/v1/touch/left";
+    public string AddrTouchR    { get; set; } = "/ChairOSC/v1/touch/right";
+
+    // -------- heated socks --------
+    // Known MACs from the paired devices (persist across restarts so we can
+    // reconnect without a scan — see docs/heated-socks-protocol.md).
+    public string? SockLMac { get; set; }
+    public string? SockRMac { get; set; }
+
+    /// <summary>Idle baseline temperature when nothing else is requested.
+    /// Shared by both feet.</summary>
+    public bool SockBaselineOn { get; set; } = true;
+    public int  SockBaseline   { get; set; } = 30;
+
+    /// <summary>Target temperature while PFHotHigh is active.</summary>
+    public int SockHeatTouch { get; set; } = 55;
+
+    /// <summary>Max temperature the heat float maps to when non-zero.
+    /// The resolver is a step function, not linear — the socks are too
+    /// thermally lazy for sub-max values to matter, and frequent writes
+    /// risk overloading them.</summary>
+    public int SockHeatMax { get; set; } = 60;
+
+    /// <summary>Max temperature a touchL/R float maps to when non-zero.</summary>
+    public int SockTouchMax { get; set; } = 45;
+
+    /// <summary>Hard safety limit, °C. Clamped to the firmware's 70 °C ceiling
+    /// in the resolver. Lowering this at runtime drags HeatTouch/HeatMax/
+    /// TouchMax down with it in the GUI.</summary>
+    public int SockLimit { get; set; } = 60;
+
+    /// <summary>Manual-override targets, °C, per foot. Only consulted when
+    /// <see cref="ControlService.ManualOverride"/> is on.</summary>
+    public int ManualSockL { get; set; } = 40;
+    public int ManualSockR { get; set; } = 40;
 
     // MQTT publish — pushes the current state (mode/level/source, connection,
     // telemetry) to a broker so Home Assistant can mirror the device and react

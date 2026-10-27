@@ -12,17 +12,27 @@ namespace ReonOSC.Services;
 public sealed class ControlService : IAsyncDisposable
 {
     public ReonClient Reon { get; } = new();
+    public SockClient SockL { get; } = new(SockClient.Side.Left);
+    public SockClient SockR { get; } = new(SockClient.Side.Right);
     public OscServer Osc { get; } = new();
     public PfSignalReader PfSignal { get; } = new();
     public Settings Settings { get; private set; }
     private readonly OscInputs _inputs = new();
 
-    /// <summary>If true, OSC inputs are ignored and the GUI's manual mode/level is used.</summary>
+    /// <summary>If true, OSC inputs are ignored and the GUI's manual mode/level is used.
+    /// Applies to the Reon AND both socks — the sock targets switch to <see cref="Models.Settings.ManualSockL"/>
+    /// / <see cref="Models.Settings.ManualSockR"/>.</summary>
     public bool ManualOverride { get; set; }
     public ResolvedCommand ManualCommand { get; set; } = ResolvedCommand.Stop;
 
     public ResolvedCommand LastSentCommand { get; private set; } = ResolvedCommand.Stop;
     public DateTime LastSentAt { get; private set; }
+
+    /// <summary>Last resolver intent for each sock. Updates on every Reconcile
+    /// regardless of whether a BLE write happened — matches
+    /// <see cref="LastResolvedCommand"/>'s behaviour for the Reon.</summary>
+    public SockTarget LastResolvedSockL { get; private set; } = SockTarget.Off;
+    public SockTarget LastResolvedSockR { get; private set; } = SockTarget.Off;
     /// <summary>What the resolver currently wants the device to be doing —
     /// updates on every Reconcile regardless of whether the BLE write
     /// actually happened. MQTT publishes this so HA sees the "intended"
@@ -41,12 +51,15 @@ public sealed class ControlService : IAsyncDisposable
     public event EventHandler<ResolvedCommand>? CommandSent;
     public event EventHandler<string>? Log;
     /// <summary>Fires whenever any OSC input value changes. Snapshot keys match
-    /// the GUI contract: "PFHotHigh", "water", "cold", "heat".</summary>
+    /// the GUI contract: "PFHotHigh", "water", "cold", "heat", "wind", "touchL", "touchR".</summary>
     public event EventHandler<IReadOnlyDictionary<string, float>>? InputsChanged;
     /// <summary>Fires when (cmd, source, reason) changes — regardless of
     /// whether a BLE write actually happened. MQTT consumers listen here so
     /// they can publish reason changes even when no Reon is connected.</summary>
     public event EventHandler<(ResolvedCommand cmd, string source, string reason)>? StateChanged;
+    /// <summary>Fires when a sock's resolved target changes. Independent of
+    /// Reon — the socks run their own resolver (<see cref="SockResolver"/>).</summary>
+    public event EventHandler<(SockClient.Side side, SockTarget target)>? SockTargetChanged;
 
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly TimeSpan _minWriteGap = TimeSpan.FromMilliseconds(120);
@@ -69,6 +82,8 @@ public sealed class ControlService : IAsyncDisposable
         Osc.MessageReceived += OnOscMessage;
         Osc.Log += (_, msg) => Log?.Invoke(this, msg);
         Reon.Log += (_, msg) => Log?.Invoke(this, msg);
+        SockL.Log += (_, msg) => Log?.Invoke(this, msg);
+        SockR.Log += (_, msg) => Log?.Invoke(this, msg);
         PfSignal.Log += (_, msg) => Log?.Invoke(this, msg);
 
         // Plug the PFSignal reader directly into the resolver: every time the
@@ -136,6 +151,12 @@ public sealed class ControlService : IAsyncDisposable
         try { _periodicReconcile.Dispose(); } catch { }
         Osc.Dispose();
         PfSignal.Dispose();
+        // Safety: turn the heating off before releasing the handles. A sock
+        // left on 60 °C through a crash or process kill is a burn risk.
+        try { await SockL.TurnOffAsync().ConfigureAwait(false); } catch { }
+        try { await SockR.TurnOffAsync().ConfigureAwait(false); } catch { }
+        try { await SockL.DisposeAsync().ConfigureAwait(false); } catch { }
+        try { await SockR.DisposeAsync().ConfigureAwait(false); } catch { }
         await Reon.DisposeAsync().ConfigureAwait(false);
         _writeLock.Dispose();
     }
@@ -227,6 +248,16 @@ public sealed class ControlService : IAsyncDisposable
             // Sender emits a bool (on/off zone) — store as 0 or 1.
             if (msg.TryGetBool(0, out var b)) UpdateInput(InputSource.Wind, b ? 1f : 0f);
         }
+        else if (MatchAddress(addr, Settings.AddrTouchL))
+        {
+            if (msg.TryGetFloat(0, out var f)) UpdateInput(InputSource.TouchL, Math.Clamp(f, 0f, 1f));
+            else if (msg.TryGetBool(0, out var b)) UpdateInput(InputSource.TouchL, b ? 1f : 0f);
+        }
+        else if (MatchAddress(addr, Settings.AddrTouchR))
+        {
+            if (msg.TryGetFloat(0, out var f)) UpdateInput(InputSource.TouchR, Math.Clamp(f, 0f, 1f));
+            else if (msg.TryGetBool(0, out var b)) UpdateInput(InputSource.TouchR, b ? 1f : 0f);
+        }
         // Unmatched addresses are intentionally silent — the packet counter
         // above proves the pipe works, and the OSC inputs panel in the GUI
         // surfaces matched values directly.
@@ -278,6 +309,8 @@ public sealed class ControlService : IAsyncDisposable
         ["cold"]      = _inputs.Get(InputSource.Cold),
         ["heat"]      = _inputs.Get(InputSource.Heat),
         ["wind"]      = _inputs.Get(InputSource.Wind),
+        ["touchL"]    = _inputs.Get(InputSource.TouchL),
+        ["touchR"]    = _inputs.Get(InputSource.TouchR),
     };
 
     /// <summary>
@@ -327,7 +360,10 @@ public sealed class ControlService : IAsyncDisposable
     /// Two parallel trackers: <see cref="LastResolvedCommand"/> follows
     /// the resolver's current intent (always up to date), while
     /// <see cref="LastSentCommand"/> only updates on successful BLE write
-    /// — they diverge when the device is disconnected.</summary>
+    /// — they diverge when the device is disconnected.
+    ///
+    /// Also resolves per-foot sock targets with a 10 s off-hysteresis and
+    /// pushes them to <see cref="SockL"/> / <see cref="SockR"/>.</summary>
     public async Task ReconcileAsync(CancellationToken ct = default)
     {
         var (target, source, reason) = ResolveTarget();
@@ -342,51 +378,99 @@ public sealed class ControlService : IAsyncDisposable
             StateChanged?.Invoke(this, (target, source, reason));
         }
 
-        if (!Reon.IsConnected) return;
+        ReconcileSocks();
 
-        // Device already matches resolved target — nothing to write.
-        if (target == LastSentCommand) return;
-
-        if (!await _writeLock.WaitAsync(0, ct).ConfigureAwait(false)) return;
-        try
+        if (Reon.IsConnected && target != LastSentCommand)
         {
-            // simple debounce: rate-limit writes to ~8 per second
-            var elapsed = DateTime.UtcNow - LastSentAt;
-            if (elapsed < _minWriteGap)
-                await Task.Delay(_minWriteGap - elapsed, ct).ConfigureAwait(false);
-
-            // re-evaluate after the wait so we don't send a stale target
-            (target, source, reason) = ResolveTarget();
-            if (target != LastResolvedCommand || source != LastCommandSource || reason != LastCommandReason)
-            {
-                LastResolvedCommand = target;
-                LastCommandSource = source;
-                LastCommandReason = reason;
-                StateChanged?.Invoke(this, (target, source, reason));
-            }
-            if (target == LastSentCommand) return;
-
+            if (!await _writeLock.WaitAsync(0, ct).ConfigureAwait(false)) return;
             try
             {
-                switch (target.Mode)
+                // simple debounce: rate-limit writes to ~8 per second
+                var elapsed = DateTime.UtcNow - LastSentAt;
+                if (elapsed < _minWriteGap)
+                    await Task.Delay(_minWriteGap - elapsed, ct).ConfigureAwait(false);
+
+                // re-evaluate after the wait so we don't send a stale target
+                (target, source, reason) = ResolveTarget();
+                if (target != LastResolvedCommand || source != LastCommandSource || reason != LastCommandReason)
                 {
-                    case ReonProtocol.Mode.Cool: await Reon.SetCoolAsync(target.Level, ct).ConfigureAwait(false); break;
-                    case ReonProtocol.Mode.Heat: await Reon.SetHeatAsync(target.Level, ct).ConfigureAwait(false); break;
-                    default: await Reon.StopAsync(ct).ConfigureAwait(false); break;
+                    LastResolvedCommand = target;
+                    LastCommandSource = source;
+                    LastCommandReason = reason;
+                    StateChanged?.Invoke(this, (target, source, reason));
                 }
-                LastSentCommand = target;
-                LastSentAt = DateTime.UtcNow;
-                CommandSent?.Invoke(this, target);
+                if (target == LastSentCommand) return;
+
+                try
+                {
+                    switch (target.Mode)
+                    {
+                        case ReonProtocol.Mode.Cool: await Reon.SetCoolAsync(target.Level, ct).ConfigureAwait(false); break;
+                        case ReonProtocol.Mode.Heat: await Reon.SetHeatAsync(target.Level, ct).ConfigureAwait(false); break;
+                        default: await Reon.StopAsync(ct).ConfigureAwait(false); break;
+                    }
+                    LastSentCommand = target;
+                    LastSentAt = DateTime.UtcNow;
+                    CommandSent?.Invoke(this, target);
+                }
+                catch (Exception ex)
+                {
+                    Log?.Invoke(this, $"Write failed: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                Log?.Invoke(this, $"Write failed: {ex.Message}");
+                _writeLock.Release();
             }
-        }
-        finally
-        {
-            _writeLock.Release();
         }
     }
 
+    private void ReconcileSocks()
+    {
+        var nowUtc = DateTime.UtcNow;
+        SockTarget tL, tR;
+        if (ManualOverride)
+        {
+            tL = SockResolver.ResolveManual(Settings.ManualSockL, Settings);
+            tR = SockResolver.ResolveManual(Settings.ManualSockR, Settings);
+        }
+        else
+        {
+            tL = SockResolver.Resolve(SockResolver.Foot.Left,  _inputs, Settings, nowUtc);
+            tR = SockResolver.Resolve(SockResolver.Foot.Right, _inputs, Settings, nowUtc);
+        }
+
+        if (tL != LastResolvedSockL)
+        {
+            LastResolvedSockL = tL;
+            SockTargetChanged?.Invoke(this, (SockClient.Side.Left, tL));
+            if (tL != SockTarget.Off)
+                Log?.Invoke(this, $"Sock L → {tL.TempC} °C ({tL.Source})");
+            else
+                Log?.Invoke(this, "Sock L → off");
+        }
+        if (tR != LastResolvedSockR)
+        {
+            LastResolvedSockR = tR;
+            SockTargetChanged?.Invoke(this, (SockClient.Side.Right, tR));
+            if (tR != SockTarget.Off)
+                Log?.Invoke(this, $"Sock R → {tR.TempC} °C ({tR.Source})");
+            else
+                Log?.Invoke(this, "Sock R → off");
+        }
+
+        // Fire-and-forget per sock. SetTemperatureAsync is idempotent against
+        // its own LastSentTempC so re-firing on every reconcile is cheap.
+        _ = SockL.SetTemperatureAsync(tL.TempC);
+        _ = SockR.SetTemperatureAsync(tR.TempC);
+    }
+
+    /// <summary>Bind a known MAC to the left or right sock and start the
+    /// background connection. Call again with a different MAC to replace it.</summary>
+    public Task BindSockAsync(SockClient.Side side, ulong mac) =>
+        (side == SockClient.Side.Left ? SockL : SockR).BindAsync(mac);
+
+    /// <summary>Release a sock's MAC binding and stop the auto-reconnect loop.</summary>
+    public Task UnbindSockAsync(SockClient.Side side) =>
+        (side == SockClient.Side.Left ? SockL : SockR).UnbindAsync();
 }

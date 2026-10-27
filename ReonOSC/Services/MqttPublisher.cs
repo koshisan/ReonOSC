@@ -82,6 +82,13 @@ public sealed class MqttPublisher : IAsyncDisposable
                 _lastTelemetry = t;
                 try { _ = PublishStateAsync(); } catch { }
             };
+            // Sock resolver intent, connection, and battery all surface via
+            // the shared state document — each triggers a republish.
+            _service.SockTargetChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.SockL.ConnectionChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.SockR.ConnectionChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.SockL.BatteryChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.SockR.BatteryChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
         }
         catch (Exception ex)
         {
@@ -268,6 +275,25 @@ public sealed class MqttPublisher : IAsyncDisposable
                 cold = inputs.GetValueOrDefault("cold"),
                 heat = inputs.GetValueOrDefault("heat"),
                 wind = inputs.GetValueOrDefault("wind"),
+                touchL = inputs.GetValueOrDefault("touchL"),
+                touchR = inputs.GetValueOrDefault("touchR"),
+            },
+            socks = new
+            {
+                l = new
+                {
+                    target = _service.LastResolvedSockL.TempC,
+                    source = _service.LastResolvedSockL.Source,
+                    connected = _service.SockL.IsConnected,
+                    battery = _service.SockL.BatteryPercent,
+                },
+                r = new
+                {
+                    target = _service.LastResolvedSockR.TempC,
+                    source = _service.LastResolvedSockR.Source,
+                    connected = _service.SockR.IsConnected,
+                    battery = _service.SockR.BatteryPercent,
+                },
             },
             timestamp = DateTime.UtcNow.ToString("o"),
         };
@@ -440,6 +466,70 @@ public sealed class MqttPublisher : IAsyncDisposable
             availability_topic = availabilityTopic,
             device,
         }).ConfigureAwait(false);
+
+        // Heated socks: four entities per foot — target °C, source label,
+        // connected binary, battery %. The socks don't have a temperature
+        // sensor; `target` is the resolver's wire value.
+        var sockDevice = new
+        {
+            identifiers = new[] { "reonosc_socks" },
+            name = "Heated socks (ReonOSC)",
+            manufacturer = "Generic (DRCODC)",
+            model = "AC632N",
+            sw_version = typeof(MqttPublisher).Assembly.GetName().Version?.ToString() ?? "0",
+        };
+
+        foreach (var side in new[] { "l", "r" })
+        {
+            var label = side == "l" ? "L" : "R";
+            await PublishDiscoveryEntityAsync("sensor", $"sock_{side}_target", new
+            {
+                name = $"Sock {label} target",
+                unique_id = $"reonosc_sock_{side}_target",
+                state_topic = stateTopic,
+                value_template = $"{{{{ value_json.socks.{side}.target }}}}",
+                unit_of_measurement = "°C",
+                icon = "mdi:thermometer",
+                state_class = "measurement",
+                availability_topic = availabilityTopic,
+                device = sockDevice,
+            }).ConfigureAwait(false);
+
+            await PublishDiscoveryEntityAsync("sensor", $"sock_{side}_source", new
+            {
+                name = $"Sock {label} source",
+                unique_id = $"reonosc_sock_{side}_source",
+                state_topic = stateTopic,
+                value_template = $"{{{{ value_json.socks.{side}.source }}}}",
+                icon = "mdi:source-branch",
+                availability_topic = availabilityTopic,
+                device = sockDevice,
+            }).ConfigureAwait(false);
+
+            await PublishDiscoveryEntityAsync("binary_sensor", $"sock_{side}_connected", new
+            {
+                name = $"Sock {label} connected",
+                unique_id = $"reonosc_sock_{side}_connected",
+                state_topic = stateTopic,
+                value_template = $"{{{{ 'ON' if value_json.socks.{side}.connected else 'OFF' }}}}",
+                device_class = "connectivity",
+                availability_topic = availabilityTopic,
+                device = sockDevice,
+            }).ConfigureAwait(false);
+
+            await PublishDiscoveryEntityAsync("sensor", $"sock_{side}_battery", new
+            {
+                name = $"Sock {label} battery",
+                unique_id = $"reonosc_sock_{side}_battery",
+                state_topic = stateTopic,
+                value_template = $"{{{{ value_json.socks.{side}.battery if value_json.socks.{side}.battery is not none else none }}}}",
+                unit_of_measurement = "%",
+                device_class = "battery",
+                state_class = "measurement",
+                availability_topic = availabilityTopic,
+                device = sockDevice,
+            }).ConfigureAwait(false);
+        }
 
         // Retire the entities published by previous builds so HA doesn't
         // keep showing them as 'unavailable' indefinitely. An empty retained

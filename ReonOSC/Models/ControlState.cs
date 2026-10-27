@@ -2,21 +2,30 @@ namespace ReonOSC.Models;
 
 /// <summary>The OSC-driven input sources, each with a value and a timestamp.
 /// Wind is forwarded to MQTT but is NOT consulted by the Reon resolver — the
-/// device has no fan, so wind is purely passthrough.</summary>
-public enum InputSource { PfHotHigh, Water, Cold, Heat, Wind }
+/// device has no fan, so wind is purely passthrough. TouchL/R only drive the
+/// socks, one per foot.</summary>
+public enum InputSource { PfHotHigh, Water, Cold, Heat, Wind, TouchL, TouchR }
 
 public sealed class OscInputs
 {
-    private readonly float[] _values = new float[5];
-    private readonly DateTime[] _changedAt = new DateTime[5];
+    private const int Count = 7;
+    private readonly float[] _values = new float[Count];
+    private readonly DateTime[] _changedAt = new DateTime[Count];
+    /// <summary>Last time this input was observed with a positive value.
+    /// Used by the sock resolver for off-hysteresis — brief drops to 0 are
+    /// held active for a window before actually turning the heating off.</summary>
+    private readonly DateTime[] _lastActiveAt = new DateTime[Count];
 
     public float Get(InputSource src) => _values[(int)src];
 
     public DateTime GetChangedAt(InputSource src) => _changedAt[(int)src];
 
+    public DateTime GetLastActiveAt(InputSource src) => _lastActiveAt[(int)src];
+
     public bool Set(InputSource src, float value)
     {
         int idx = (int)src;
+        if (value > 0f) _lastActiveAt[idx] = DateTime.UtcNow;
         if (Math.Abs(_values[idx] - value) < 0.0001f) return false;
         _values[idx] = value;
         _changedAt[idx] = DateTime.UtcNow;
@@ -115,4 +124,95 @@ public static class ControlResolver
         Math.Clamp(level, Ble.ReonProtocol.LevelMin, Ble.ReonProtocol.LevelMax);
 
     private static DateTime Latest(DateTime a, DateTime b) => a >= b ? a : b;
+}
+
+/// <summary>Target state for a single sock: a wire temperature (0 = off,
+/// otherwise 35..70 °C) plus the source label the UI shows next to the zone.
+/// Equality is used by <see cref="Services.ControlService"/> to decide
+/// whether a BLE write is needed.</summary>
+public readonly record struct SockTarget(byte TempC, string Source)
+{
+    public static readonly SockTarget Off = new(0, "Off");
+}
+
+/// <summary>
+/// Resolves per-foot sock targets. Pure function of state. Each OSC input is
+/// treated as a step function — the socks are too thermally lazy for linear
+/// scaling to buy anything, and frequent writes risk overloading them — plus
+/// an off-hysteresis window so brief drops to 0 don't bounce the heating.
+/// Rules per the user:
+///   value &gt; 0        → source counts as active immediately (its full max)
+///   value == 0 ≥ 10s → source counts as inactive
+///
+/// Candidates per foot (whichever contributes the highest wire temp wins):
+///   BaselineOn active       → baseline            source="Baseline"
+///   PFHotHigh active        → heatTouch           source="Heat"
+///   heat float active       → sockHeatMax         source="Heat"
+///   touchL/R float active   → touchMax            source="Touch"
+/// If none active and baseline off → Off (0, "Off"). Target is clamped to
+/// SockLimit before leaving the resolver.
+/// </summary>
+public static class SockResolver
+{
+    public static readonly TimeSpan HysteresisWindow = TimeSpan.FromSeconds(10);
+
+    public enum Foot { Left, Right }
+
+    public static SockTarget Resolve(Foot foot, OscInputs inputs, Settings settings, DateTime nowUtc)
+    {
+        int limit = ClampLimit(settings.SockLimit);
+        int best = 0;
+        string source = "Off";
+
+        void Consider(int candidate, string label)
+        {
+            // Priority on tie: Manual > Heat > Touch > Baseline. The resolver
+            // itself doesn't deal with Manual (the caller substitutes it),
+            // so between Heat/Touch/Baseline we only need a lexical tiebreak
+            // defined by first-wins order of insertion below. Keep it simple:
+            // strict greater-than, so Heat always edges out an equal-value
+            // Baseline because it's considered first.
+            if (candidate > best)
+            {
+                best = candidate;
+                source = label;
+            }
+        }
+
+        if (IsActive(inputs, InputSource.PfHotHigh, nowUtc))
+            Consider(settings.SockHeatTouch, "Heat");
+        if (IsActive(inputs, InputSource.Heat, nowUtc))
+            Consider(settings.SockHeatMax, "Heat");
+        var touchSrc = foot == Foot.Left ? InputSource.TouchL : InputSource.TouchR;
+        if (IsActive(inputs, touchSrc, nowUtc))
+            Consider(settings.SockTouchMax, "Touch");
+        if (settings.SockBaselineOn)
+            Consider(settings.SockBaseline, "Baseline");
+
+        if (best <= 0) return SockTarget.Off;
+        int clamped = Math.Clamp(best, 0, limit);
+        return new SockTarget((byte)clamped, source);
+    }
+
+    public static SockTarget ResolveManual(int manualTempC, Settings settings)
+    {
+        int limit = ClampLimit(settings.SockLimit);
+        int c = Math.Clamp(manualTempC, 0, limit);
+        if (c <= 0) return SockTarget.Off;
+        return new SockTarget((byte)c, "Manual");
+    }
+
+    private static bool IsActive(OscInputs inputs, InputSource src, DateTime nowUtc)
+    {
+        if (inputs.Get(src) > 0f) return true;
+        var lastOn = inputs.GetLastActiveAt(src);
+        if (lastOn == default) return false;
+        return (nowUtc - lastOn) < HysteresisWindow;
+    }
+
+    /// <summary>Hard-cap the configured limit at the sock firmware's max
+    /// (70 °C). Nothing in the UI should allow more, but defence in depth —
+    /// a corrupted settings file must never translate to a 90 °C write.</summary>
+    public static int ClampLimit(int limit) =>
+        Math.Clamp(limit, 0, Ble.SockProtocol.TempMax);
 }
