@@ -74,6 +74,10 @@ Examples:
 off    AA 01 01 00 02 55
 ```
 
+The app's "Quick heater" switch (快速加热) is not a separate mode. It just
+sends the normal temperature frame: on → 70 °C, off → 50 °C. It also
+moves the slider to that value (from app code).
+
 The sock does not reply to temperature or timer writes. The temperature LEDs
 change immediately. 40 °C seems to light no LED, so use ≥ 50 °C for
 visual tests.
@@ -114,8 +118,14 @@ the gaming PC.
 The vendor backend (`*.ble.sunny-tech.com`) is only used for a remote
 partner control feature over a WebSocket. Local control does not touch it.
 
+## Thermal behaviour
+
+Classic heating wires, no active cooling. Worn, the heat is clearly felt
+about **40–60 s** after switching on (tested with the vendor app).
+Cool-down has not been measured yet.
+
 ## Open questions
 
-- Warm-up and cool-down times (to be measured with the vendor app).
+- Cool-down time.
 - What the cuff button cycles through, and whether it reports changes.
 - Timer command on the device.
