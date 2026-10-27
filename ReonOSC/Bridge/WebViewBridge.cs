@@ -44,7 +44,11 @@ public sealed class WebViewBridge : IDisposable
         _web.CoreWebView2.WebMessageReceived += OnWebMessage;
 
         _service.Log += (_, msg) => Push("log.line", new { t = Ts(), kind = ClassifyLog(msg), msg });
-        _service.CommandSent += (_, cmd) => PushCurrent(cmd, _service.LastCommandSource, _service.LastCommandReason);
+        _service.CommandSent += (_, cmd) =>
+        {
+            PushCurrent(cmd, _service.LastCommandSource, _service.LastCommandReason);
+            PushZones();
+        };
         // Reason-only updates: when the trigger changes but the wire command
         // stays the same (e.g. PFSignal → OSC:PFHotHigh both resolving to
         // Heat L3), CommandSent doesn't fire. StateChanged catches it so the
@@ -63,7 +67,15 @@ public sealed class WebViewBridge : IDisposable
                 source = s.source,
                 reason = s.reason,
             });
+            PushZones();
         };
+        _service.SockTargetChanged += (_, _) => PushZones();
+        _service.SockL.ConnectionChanged += (_, up) => PushDeviceState("sockL", up ? "connected" : "disconnected");
+        _service.SockR.ConnectionChanged += (_, up) => PushDeviceState("sockR", up ? "connected" : "disconnected");
+        _service.SockL.BatteryChanged += (_, _) => PushDeviceState("sockL",
+            _service.SockL.IsConnected ? "connected" : "disconnected");
+        _service.SockR.BatteryChanged += (_, _) => PushDeviceState("sockR",
+            _service.SockR.IsConnected ? "connected" : "disconnected");
         _service.Reon.TelemetryReceived += (_, t) => Push("telemetry", new
         {
             plate = t.SkinPlate, sink = t.Heatsink, board = t.Board, ambient = t.Ambient,
@@ -156,23 +168,33 @@ public sealed class WebViewBridge : IDisposable
     {
         switch (cmd)
         {
-            case "ui.ready":       OnUiReady(); break;
-            case "connect":        _ = ConnectAsync(); break;
-            case "disconnect":     _ = DisconnectAsync(); break;
-            case "pair":           _ = PairAsync(); break;
-            case "osc.start":      OscStart(payload); break;
-            case "osc.stop":       _service.StopOsc(); PushOscState(); break;
-            case "osc.setPort":    SetOscPort(payload); break;
-            case "osc.setAddress": SetAddress(payload); break;
-            case "manual.toggle":  _ = ToggleManual(payload); break;
-            case "manual.set":     _ = SetManual(payload); break;
-            case "preset.heat":    PresetHeat(payload); break;
-            case "preset.cold":    PresetCold(payload); break;
-            case "options.set":    SetOptions(payload); break;
-            case "pfHook.toggle":  TogglePfHook(payload); break;
+            case "ui.ready":        OnUiReady(); break;
+
+            // Legacy (reon-only) connect/disconnect/pair kept so the current
+            // UI still works until Phase 4 swaps it out.
+            case "connect":         _ = ConnectAsync(); break;
+            case "disconnect":      _ = DisconnectAsync(); break;
+            case "pair":            _ = PairAsync(); break;
+
+            // New per-device contract: {id: "reon" | "sockL" | "sockR"}.
+            case "device.connect":    _ = DeviceConnectAsync(payload); break;
+            case "device.disconnect": _ = DeviceDisconnectAsync(payload); break;
+            case "device.pair":       _ = DevicePairAsync(payload); break;
+
+            case "osc.start":       OscStart(payload); break;
+            case "osc.stop":        _service.StopOsc(); PushOscState(); break;
+            case "osc.setPort":     SetOscPort(payload); break;
+            case "osc.setAddress":  SetAddress(payload); break;
+            case "manual.toggle":   _ = ToggleManual(payload); break;
+            case "manual.set":      _ = SetManual(payload); break;
+            case "preset.heat":     PresetHeat(payload); break;
+            case "preset.cold":     PresetCold(payload); break;
+            case "socks.config":    _ = SocksConfig(payload); break;
+            case "options.set":     SetOptions(payload); break;
+            case "pfHook.toggle":   TogglePfHook(payload); break;
             case "pfSignal.capture": CapturePfSignal(payload); break;
-            case "mqtt.set":       SetMqtt(payload); break;
-            case "log.clear":      /* the UI owns its own log buffer */ break;
+            case "mqtt.set":        SetMqtt(payload); break;
+            case "log.clear":       /* the UI owns its own log buffer */ break;
             default: Push("log.line", new { t = Ts(), kind = "err", msg = $"Unknown command: {cmd}" }); break;
         }
     }
@@ -191,12 +213,27 @@ public sealed class WebViewBridge : IDisposable
                 cold = _settings.AddrCold,
                 heat = _settings.AddrHeat,
                 wind = _settings.AddrWind,
+                touchL = _settings.AddrTouchL,
+                touchR = _settings.AddrTouchR,
             },
             heatTouchLevel = _settings.HeatTouchLevel,
             coldWaterLevel = _settings.ColdWaterLevel,
             startMinimised = _settings.StartMinimised,
             autoConnectOnStart = _settings.AutoConnectOnStart,
             enablePfSignalHook = _settings.EnablePfSignalHook,
+            socks = new
+            {
+                lMac = _settings.SockLMac,
+                rMac = _settings.SockRMac,
+                baselineOn = _settings.SockBaselineOn,
+                baseline = _settings.SockBaseline,
+                heatTouch = _settings.SockHeatTouch,
+                heatMax = _settings.SockHeatMax,
+                touchMax = _settings.SockTouchMax,
+                limit = _settings.SockLimit,
+                manualL = _settings.ManualSockL,
+                manualR = _settings.ManualSockR,
+            },
             mqtt = new
             {
                 enabled = _settings.MqttEnabled,
@@ -252,6 +289,25 @@ public sealed class WebViewBridge : IDisposable
         // Push the current OSC inputs once so the GUI has a baseline reading.
         PushInputs(_service.Snapshot());
 
+        // New v3 scoped events for the body-map UI.
+        PushDeviceState("reon",
+            _service.Reon.IsConnected ? "connected" : "disconnected", _settings.LastKnownMac);
+        PushDeviceState("sockL",
+            _service.SockL.IsConnected ? "connected" : "disconnected", _settings.SockLMac);
+        PushDeviceState("sockR",
+            _service.SockR.IsConnected ? "connected" : "disconnected", _settings.SockRMac);
+        PushZones();
+
+        // Auto-connect any socks that already have a MAC saved. The Reon's
+        // auto-connect is handled below.
+        if (_settings.AutoConnectOnStart)
+        {
+            if (!string.IsNullOrWhiteSpace(_settings.SockLMac))
+                _ = ConnectSockAsync(SockClient.Side.Left);
+            if (!string.IsNullOrWhiteSpace(_settings.SockRMac))
+                _ = ConnectSockAsync(SockClient.Side.Right);
+        }
+
         // The first OSC packet may have arrived before the bridge was wired
         // (the GUI takes a few seconds to come up). Surface that info now
         // so the user can confirm the pipe and see what's actually arriving.
@@ -267,9 +323,15 @@ public sealed class WebViewBridge : IDisposable
 
     private async Task ConnectAsync()
     {
-        if (_service.Reon.IsConnected) { Push("conn.state", new { state = "connected" }); return; }
+        if (_service.Reon.IsConnected)
+        {
+            Push("conn.state", new { state = "connected" });
+            PushDeviceState("reon", "connected");
+            return;
+        }
 
         Push("conn.state", new { state = "connecting" });
+        PushDeviceState("reon", "connecting");
         Push("log.line", new { t = Ts(), kind = "info", msg = "Connecting …" });
 
         try
@@ -279,6 +341,7 @@ public sealed class WebViewBridge : IDisposable
             {
                 Push("log.line", new { t = Ts(), kind = "err", msg = "Reon not visible." });
                 Push("conn.state", new { state = "disconnected" });
+                PushDeviceState("reon", "disconnected");
                 return;
             }
 
@@ -287,6 +350,7 @@ public sealed class WebViewBridge : IDisposable
             {
                 Push("log.line", new { t = Ts(), kind = "err", msg = "No bond token saved. Pair the device first." });
                 Push("conn.state", new { state = "disconnected" });
+                PushDeviceState("reon", "disconnected");
                 return;
             }
 
@@ -304,12 +368,14 @@ public sealed class WebViewBridge : IDisposable
                     heatMax = _service.Reon.Capabilities.HeatLevelMax,
                 },
             });
+            PushDeviceState("reon", "connected", ReonClient.FormatMac(addr.Value));
             Push("log.line", new { t = Ts(), kind = "ok", msg = $"Connected and authed{(_service.Reon.Model is { } m ? $" ({m})" : "")}." });
         }
         catch (Exception ex)
         {
             Push("log.line", new { t = Ts(), kind = "err", msg = $"Connect failed: {ex.Message}" });
             Push("conn.state", new { state = "disconnected" });
+            PushDeviceState("reon", "disconnected");
         }
     }
 
@@ -318,12 +384,108 @@ public sealed class WebViewBridge : IDisposable
         try { await _service.Reon.DisposeAsync(); } catch { }
         _connectedAt = null;
         Push("conn.state", new { state = "disconnected" });
+        PushDeviceState("reon", "disconnected");
         Push("log.line", new { t = Ts(), kind = "info", msg = "Disconnected." });
+    }
+
+    // ---- per-device dispatch (new contract) --------------------------------
+
+    private static string? DeviceId(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return null;
+        return payload.TryGetProperty("id", out var i) ? i.GetString() : null;
+    }
+
+    private Task DeviceConnectAsync(JsonElement payload) => (DeviceId(payload)) switch
+    {
+        "reon"  => ConnectAsync(),
+        "sockL" => ConnectSockAsync(SockClient.Side.Left),
+        "sockR" => ConnectSockAsync(SockClient.Side.Right),
+        _ => Task.CompletedTask,
+    };
+
+    private Task DeviceDisconnectAsync(JsonElement payload) => (DeviceId(payload)) switch
+    {
+        "reon"  => DisconnectAsync(),
+        "sockL" => _service.UnbindSockAsync(SockClient.Side.Left).ContinueWith(_ =>
+                    PushDeviceState("sockL", "disconnected")),
+        "sockR" => _service.UnbindSockAsync(SockClient.Side.Right).ContinueWith(_ =>
+                    PushDeviceState("sockR", "disconnected")),
+        _ => Task.CompletedTask,
+    };
+
+    private Task DevicePairAsync(JsonElement payload) => (DeviceId(payload)) switch
+    {
+        "reon"  => PairAsync(),
+        "sockL" => PairSockAsync(SockClient.Side.Left),
+        "sockR" => PairSockAsync(SockClient.Side.Right),
+        _ => Task.CompletedTask,
+    };
+
+    private async Task ConnectSockAsync(SockClient.Side side)
+    {
+        var mac = side == SockClient.Side.Left ? _settings.SockLMac : _settings.SockRMac;
+        if (string.IsNullOrWhiteSpace(mac))
+        {
+            Push("log.line", new { t = Ts(), kind = "err",
+                msg = $"Sock {(side == SockClient.Side.Left ? "L" : "R")} has no MAC saved — pair first." });
+            PushDeviceState(side == SockClient.Side.Left ? "sockL" : "sockR", "disconnected");
+            return;
+        }
+        PushDeviceState(side == SockClient.Side.Left ? "sockL" : "sockR", "connecting", mac);
+        try { await _service.BindSockAsync(side, SockClient.ParseMac(mac)); }
+        catch (Exception ex)
+        {
+            Push("log.line", new { t = Ts(), kind = "err",
+                msg = $"Sock {(side == SockClient.Side.Left ? "L" : "R")} bind failed: {ex.Message}" });
+        }
+    }
+
+    private async Task PairSockAsync(SockClient.Side side)
+    {
+        var tag = side == SockClient.Side.Left ? "sockL" : "sockR";
+        var label = side == SockClient.Side.Left ? "L" : "R";
+        PushDeviceState(tag, "pairing");
+        Push("log.line", new { t = Ts(), kind = "info", msg = $"Scanning for Sock {label} …" });
+
+        try
+        {
+            var found = await SockClient.ScanForSocksAsync(TimeSpan.FromSeconds(20));
+            // Prefer a MAC that isn't already bound to the other foot.
+            var otherMac = side == SockClient.Side.Left ? _settings.SockRMac : _settings.SockLMac;
+            ulong? otherParsed = null;
+            if (!string.IsNullOrWhiteSpace(otherMac))
+            { try { otherParsed = SockClient.ParseMac(otherMac); } catch { } }
+
+            var pick = found.FirstOrDefault(m => m != otherParsed);
+            if (pick == 0)
+            {
+                Push("log.line", new { t = Ts(), kind = "err",
+                    msg = $"Sock {label} not found. ({found.Count} candidates seen; move the sock closer or press its button to wake it.)" });
+                PushDeviceState(tag, "disconnected");
+                return;
+            }
+
+            var macStr = SockClient.FormatMac(pick);
+            if (side == SockClient.Side.Left) _settings.SockLMac = macStr;
+            else                              _settings.SockRMac = macStr;
+            _settings.Save();
+
+            Push("log.line", new { t = Ts(), kind = "ok", msg = $"Sock {label} paired → {macStr}" });
+            PushDeviceState(tag, "connecting", macStr);
+            await _service.BindSockAsync(side, pick);
+        }
+        catch (Exception ex)
+        {
+            Push("log.line", new { t = Ts(), kind = "err", msg = $"Sock {label} pair failed: {ex.Message}" });
+            PushDeviceState(tag, "disconnected");
+        }
     }
 
     private async Task PairAsync()
     {
         Push("conn.state", new { state = "pairing" });
+        PushDeviceState("reon", "pairing");
         Push("log.line", new { t = Ts(), kind = "info", msg = "Scanning for Reon in pair mode …" });
 
         try
@@ -333,6 +495,7 @@ public sealed class WebViewBridge : IDisposable
             {
                 Push("log.line", new { t = Ts(), kind = "err", msg = "Reon not found. Long-press the button to enter pair mode." });
                 Push("conn.state", new { state = "disconnected" });
+                PushDeviceState("reon", "disconnected");
                 return;
             }
 
@@ -368,11 +531,13 @@ public sealed class WebViewBridge : IDisposable
                     heatMax = _service.Reon.Capabilities.HeatLevelMax,
                 },
             });
+            PushDeviceState("reon", "connected", ReonClient.FormatMac(addr.Value));
         }
         catch (Exception ex)
         {
             Push("log.line", new { t = Ts(), kind = "err", msg = $"Pair failed: {ex.Message}" });
             Push("conn.state", new { state = "disconnected" });
+            PushDeviceState("reon", "disconnected");
         }
     }
 
@@ -426,6 +591,8 @@ public sealed class WebViewBridge : IDisposable
             case "cold":      _settings.AddrCold      = addr; break;
             case "heat":      _settings.AddrHeat      = addr; break;
             case "wind":      _settings.AddrWind      = addr; break;
+            case "touchL":    _settings.AddrTouchL    = addr; break;
+            case "touchR":    _settings.AddrTouchR    = addr; break;
             default: return;
         }
         _settings.Save();
@@ -442,23 +609,102 @@ public sealed class WebViewBridge : IDisposable
     private async Task SetManual(JsonElement payload)
     {
         if (payload.ValueKind != JsonValueKind.Object) return;
-        var modeStr = payload.TryGetProperty("mode", out var m) ? m.GetString() : "Stop";
-        var level = payload.TryGetProperty("level", out var l) && l.TryGetInt32(out var li) ? li : 0;
-        var mode = modeStr switch
+
+        // Legacy single-mode form (Reon only).
+        if (payload.TryGetProperty("mode", out var m))
         {
-            "Cool" => ReonProtocol.Mode.Cool,
-            "Heat" => ReonProtocol.Mode.Heat,
-            _      => ReonProtocol.Mode.Stop,
-        };
+            var modeStr = m.GetString();
+            var level = payload.TryGetProperty("level", out var l) && l.TryGetInt32(out var li) ? li : 0;
+            var mode = modeStr switch
+            {
+                "Cool" => ReonProtocol.Mode.Cool,
+                "Heat" => ReonProtocol.Mode.Heat,
+                _      => ReonProtocol.Mode.Stop,
+            };
+            var caps = _service.Reon.Capabilities;
+            var modeMax = mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
+            level = Math.Clamp(level, ReonProtocol.LevelMin, modeMax);
+            _service.ManualCommand = new ResolvedCommand(mode, level);
+        }
+        else if (payload.TryGetProperty("reonMode", out var rm))
+        {
+            // New v3 form: {enabled?, reonMode, reonLevel, sockL, sockR}.
+            var modeStr = rm.GetString();
+            var level = payload.TryGetProperty("reonLevel", out var rl) && rl.TryGetInt32(out var rli) ? rli : 0;
+            var mode = modeStr switch
+            {
+                "Cool" => ReonProtocol.Mode.Cool,
+                "Heat" => ReonProtocol.Mode.Heat,
+                _      => ReonProtocol.Mode.Stop,
+            };
+            var caps = _service.Reon.Capabilities;
+            var modeMax = mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
+            level = Math.Clamp(level, ReonProtocol.LevelMin, modeMax);
+            _service.ManualCommand = new ResolvedCommand(mode, level);
+        }
 
-        // Clamp against the per-direction cap derived from the connected
-        // device's model. The GUI honours this too, but we double-check here
-        // so a stale UI / future caller can't punch through.
-        var caps = _service.Reon.Capabilities;
-        var modeMax = mode == ReonProtocol.Mode.Heat ? caps.HeatLevelMax : caps.CoolLevelMax;
-        level = Math.Clamp(level, ReonProtocol.LevelMin, modeMax);
+        // Both forms accept optional sockL / sockR temperatures.
+        bool sockChanged = false;
+        if (payload.TryGetProperty("sockL", out var sL) && sL.TryGetInt32(out var sLv))
+        {
+            var clamped = Math.Clamp(sLv, 0, SockResolver.ClampLimit(_settings.SockLimit));
+            if (_settings.ManualSockL != clamped) { _settings.ManualSockL = clamped; sockChanged = true; }
+        }
+        if (payload.TryGetProperty("sockR", out var sR) && sR.TryGetInt32(out var sRv))
+        {
+            var clamped = Math.Clamp(sRv, 0, SockResolver.ClampLimit(_settings.SockLimit));
+            if (_settings.ManualSockR != clamped) { _settings.ManualSockR = clamped; sockChanged = true; }
+        }
+        if (payload.TryGetProperty("enabled", out var en) && en.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            _service.ManualOverride = en.GetBoolean();
+        }
+        if (sockChanged) _settings.Save();
 
-        _service.ManualCommand = new ResolvedCommand(mode, level);
+        await _service.ReconcileAsync();
+    }
+
+    private async Task SocksConfig(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object) return;
+
+        bool anyChange = false;
+        void SetInt(string key, Action<int> apply, int lo, int hi)
+        {
+            if (payload.TryGetProperty(key, out var v) && v.TryGetInt32(out var iv))
+            {
+                apply(Math.Clamp(iv, lo, hi));
+                anyChange = true;
+            }
+        }
+        void SetBool(string key, Action<bool> apply)
+        {
+            if (payload.TryGetProperty(key, out var v) && (v.ValueKind is JsonValueKind.True or JsonValueKind.False))
+            {
+                apply(v.GetBoolean());
+                anyChange = true;
+            }
+        }
+
+        SetBool("baselineOn", b => _settings.SockBaselineOn = b);
+        SetInt("baseline",   v => _settings.SockBaseline   = v, SockProtocol.TempMin, SockProtocol.TempMax);
+        SetInt("heatTouch",  v => _settings.SockHeatTouch  = v, SockProtocol.TempMin, SockProtocol.TempMax);
+        SetInt("heatMax",    v => _settings.SockHeatMax    = v, SockProtocol.TempMin, SockProtocol.TempMax);
+        SetInt("touchMax",   v => _settings.SockTouchMax   = v, SockProtocol.TempMin, SockProtocol.TempMax);
+        SetInt("limit",      v => _settings.SockLimit      = v, SockProtocol.TempMin, SockProtocol.TempMax);
+
+        // Lowering the limit should drag every other target down with it so
+        // the UI's "every value ≤ limit" invariant can't be violated by a
+        // config sent out of order.
+        var limit = _settings.SockLimit;
+        if (_settings.SockBaseline  > limit) _settings.SockBaseline  = limit;
+        if (_settings.SockHeatTouch > limit) _settings.SockHeatTouch = limit;
+        if (_settings.SockHeatMax   > limit) _settings.SockHeatMax   = limit;
+        if (_settings.SockTouchMax  > limit) _settings.SockTouchMax  = limit;
+        if (_settings.ManualSockL   > limit) _settings.ManualSockL   = limit;
+        if (_settings.ManualSockR   > limit) _settings.ManualSockR   = limit;
+
+        if (anyChange) _settings.Save();
         await _service.ReconcileAsync();
     }
 
@@ -638,6 +884,79 @@ public sealed class WebViewBridge : IDisposable
             cold = snapshot.GetValueOrDefault("cold"),
             heat = snapshot.GetValueOrDefault("heat"),
             wind = snapshot.GetValueOrDefault("wind"),
+            touchL = snapshot.GetValueOrDefault("touchL"),
+            touchR = snapshot.GetValueOrDefault("touchR"),
+        });
+    }
+
+    /// <summary>v3 scoped device event: {id, state, mac, battery, model?, caps?}.
+    /// Model/caps are only meaningful for the reon and are included on reon
+    /// pushes; left out for the socks.</summary>
+    private void PushDeviceState(string id, string state, string? mac = null)
+    {
+        object payload = id switch
+        {
+            "reon" => new
+            {
+                id,
+                state,
+                mac = mac ?? _settings.LastKnownMac,
+                model = _service.Reon.Model,
+                caps = new
+                {
+                    coolMax = _service.Reon.Capabilities.CoolLevelMax,
+                    heatMax = _service.Reon.Capabilities.HeatLevelMax,
+                },
+            },
+            "sockL" => new
+            {
+                id,
+                state,
+                mac = mac ?? _settings.SockLMac,
+                battery = (int?)_service.SockL.BatteryPercent,
+            },
+            "sockR" => new
+            {
+                id,
+                state,
+                mac = mac ?? _settings.SockRMac,
+                battery = (int?)_service.SockR.BatteryPercent,
+            },
+            _ => new { id, state },
+        };
+        Push("device.state", payload);
+    }
+
+    /// <summary>v3 zones event: {reon:{mode,level,source}, L:{target,source}, R:{target,source}}.
+    /// Mirrors what the body-map UI reads.</summary>
+    private void PushZones()
+    {
+        var cmd = _service.LastResolvedCommand;
+        var reonMode = cmd.Mode switch
+        {
+            ReonProtocol.Mode.Cool => "Cool",
+            ReonProtocol.Mode.Heat => "Heat",
+            _ => "Stop",
+        };
+        Push("zones", new
+        {
+            reon = new
+            {
+                mode = reonMode,
+                level = cmd.Level,
+                source = _service.LastCommandSource,
+                reason = _service.LastCommandReason,
+            },
+            l = new
+            {
+                target = (int)_service.LastResolvedSockL.TempC,
+                source = _service.LastResolvedSockL.Source,
+            },
+            r = new
+            {
+                target = (int)_service.LastResolvedSockR.TempC,
+                source = _service.LastResolvedSockR.Source,
+            },
         });
     }
 
