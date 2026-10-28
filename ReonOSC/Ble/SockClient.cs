@@ -108,9 +108,11 @@ public sealed class SockClient : IAsyncDisposable
     /// <summary>
     /// Wait for the given MAC to show up in a BLE advertisement, up to
     /// <paramref name="window"/>. Returns true as soon as it's seen, false
-    /// on timeout. On the Barrot BT 5.4 Windows dongle, FromBluetoothAddress
-    /// returns null when the OS hasn't cached the device recently — a prior
-    /// successful scan hit is what makes the subsequent connect work.
+    /// on timeout. WinRT's FromBluetoothAddressAsync returns null when the
+    /// OS hasn't cached the device recently — confirmed on at least two
+    /// different Windows hosts with different dongles, so this is a
+    /// WinRT-level behaviour, not a dongle quirk. A prior successful scan
+    /// hit is what makes the subsequent connect work.
     /// </summary>
     public static Task<bool> WaitForMacAdvertAsync(ulong mac, TimeSpan window, CancellationToken ct = default)
     {
@@ -241,11 +243,13 @@ public sealed class SockClient : IAsyncDisposable
         if (_disposed || _address is null) return;
         try
         {
-            // On the Barrot BT 5.4 dongle (and plausibly other WinRT stacks)
-            // FromBluetoothAddressAsync returns null until the OS has cached
-            // the device via a recent advertisement. The vendor app only ever
-            // works right after a scan; after a reboot the socks aren't in
-            // the cache yet. Prime by scanning for the specific MAC first.
+            // WinRT's FromBluetoothAddressAsync returns null until the OS
+            // has cached the device via a recent advertisement — confirmed
+            // on at least two different Windows hosts with different
+            // dongles, so this is a stack-level behaviour, not a dongle
+            // quirk. The vendor app only ever works right after a scan;
+            // after a reboot the socks aren't in the cache yet. Prime by
+            // scanning for the specific MAC first.
             Logf($"Waiting for advertisement from {FormatMac(_address.Value)} …");
             var seen = await WaitForMacAdvertAsync(_address.Value, TimeSpan.FromSeconds(25), ct)
                 .ConfigureAwait(false);

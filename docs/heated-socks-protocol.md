@@ -99,19 +99,24 @@ not report their actual temperature.**
 
 ## Discovery on Windows
 
-On the test laptop (Barrot BT 5.4 USB dongle, WinRT/bleak) the socks'
-advertisements were picked up only rarely: about once per 30 s at best,
-sometimes not for several minutes, while an Android phone finds both
-instantly. Once connected, writes take effect immediately.
+The socks' advertisements come in slowly on Windows: about once per 30 s
+at best, sometimes not for several minutes, while an Android phone finds
+both instantly. Confirmed on two separate hosts with different BLE
+dongles (Barrot BT 5.4 USB on a test laptop, and the gaming PC with its
+own built-in adapter), so this is a Windows/WinRT thing, not a dongle
+quirk. Once connected, writes take effect immediately.
 
+A worse side effect of the same thing: `FromBluetoothAddressAsync`
+returns null whenever the OS cache doesn't currently hold the device —
+notably right after a reboot, before the first advertisement comes in.
 So the client should:
 
 - connect once and keep the connection open,
 - reconnect in the background on disconnect,
+- scan for the specific MAC before each open attempt, so the OS cache
+  gets populated and `FromBluetoothAddressAsync` has something to
+  return,
 - not depend on a fresh scan for each command.
-
-Whether this is the dongle or Windows in general still needs checking on
-the gaming PC.
 
 ## Cloud
 
