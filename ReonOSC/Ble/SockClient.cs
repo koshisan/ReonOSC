@@ -106,6 +106,42 @@ public sealed class SockClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Wait for the given MAC to show up in a BLE advertisement, up to
+    /// <paramref name="window"/>. Returns true as soon as it's seen, false
+    /// on timeout. On the Barrot BT 5.4 Windows dongle, FromBluetoothAddress
+    /// returns null when the OS hasn't cached the device recently — a prior
+    /// successful scan hit is what makes the subsequent connect work.
+    /// </summary>
+    public static Task<bool> WaitForMacAdvertAsync(ulong mac, TimeSpan window, CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var watcher = new BluetoothLEAdvertisementWatcher
+        {
+            ScanningMode = BluetoothLEScanningMode.Active,
+        };
+
+        watcher.Received += (_, args) =>
+        {
+            if (args.BluetoothAddress == mac)
+            {
+                try { watcher.Stop(); } catch { }
+                tcs.TrySetResult(true);
+            }
+        };
+
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(window);
+        cts.Token.Register(() =>
+        {
+            try { watcher.Stop(); } catch { }
+            tcs.TrySetResult(false);
+        });
+
+        watcher.Start();
+        return tcs.Task;
+    }
+
+    /// <summary>
     /// Bind this client to a MAC and open a connection. On disconnect it
     /// will reconnect in the background until <see cref="DisposeAsync"/>.
     /// Idempotent — rebinding to the same address is a no-op if already
@@ -205,6 +241,21 @@ public sealed class SockClient : IAsyncDisposable
         if (_disposed || _address is null) return;
         try
         {
+            // On the Barrot BT 5.4 dongle (and plausibly other WinRT stacks)
+            // FromBluetoothAddressAsync returns null until the OS has cached
+            // the device via a recent advertisement. The vendor app only ever
+            // works right after a scan; after a reboot the socks aren't in
+            // the cache yet. Prime by scanning for the specific MAC first.
+            Logf($"Waiting for advertisement from {FormatMac(_address.Value)} …");
+            var seen = await WaitForMacAdvertAsync(_address.Value, TimeSpan.FromSeconds(25), ct)
+                .ConfigureAwait(false);
+            if (!seen)
+            {
+                Logf("No advertisement in 25 s — will retry.");
+                ScheduleReconnect();
+                return;
+            }
+
             Logf($"Connecting to {FormatMac(_address.Value)} …");
             _device = await BluetoothLEDevice.FromBluetoothAddressAsync(_address.Value).AsTask(ct)
                       ?? throw new InvalidOperationException("FromBluetoothAddressAsync returned null");
