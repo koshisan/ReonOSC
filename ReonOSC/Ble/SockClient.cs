@@ -30,8 +30,12 @@ public sealed class SockClient : IAsyncDisposable
     public Side SockSide { get; }
 
     private BluetoothLEDevice? _device;
+    private GattSession? _session;
     private GattCharacteristic? _writeChar;
     private GattCharacteristic? _notifyChar;
+    private volatile bool _dropped;
+    private DateTime _droppedAtUtc;
+    private readonly System.Threading.Timer _watchdog;
     private ulong? _address;
     private volatile bool _disposed;
     private volatile bool _reconnectRequested;
@@ -61,6 +65,8 @@ public sealed class SockClient : IAsyncDisposable
     {
         SockSide = side;
         _batteryPollTimer = new System.Threading.Timer(_ => _ = TryQueryBatteryAsync(), null,
+            Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _watchdog = new System.Threading.Timer(_ => OnWatchdog(), null,
             Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
@@ -114,9 +120,13 @@ public sealed class SockClient : IAsyncDisposable
     /// WinRT-level behaviour, not a dongle quirk. A prior successful scan
     /// hit is what makes the subsequent connect work.
     /// </summary>
-    public static Task<bool> WaitForMacAdvertAsync(ulong mac, TimeSpan window, CancellationToken ct = default)
+    public readonly record struct AdvertWait(bool Seen, short Rssi, int TotalAdverts, TimeSpan Elapsed);
+
+    public static Task<AdvertWait> WaitForMacAdvertAsync(ulong mac, TimeSpan window, CancellationToken ct = default)
     {
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = new TaskCompletionSource<AdvertWait>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int total = 0;
         var watcher = new BluetoothLEAdvertisementWatcher
         {
             ScanningMode = BluetoothLEScanningMode.Active,
@@ -124,10 +134,11 @@ public sealed class SockClient : IAsyncDisposable
 
         watcher.Received += (_, args) =>
         {
+            Interlocked.Increment(ref total);
             if (args.BluetoothAddress == mac)
             {
                 try { watcher.Stop(); } catch { }
-                tcs.TrySetResult(true);
+                tcs.TrySetResult(new AdvertWait(true, args.RawSignalStrengthInDBm, total, sw.Elapsed));
             }
         };
 
@@ -136,7 +147,7 @@ public sealed class SockClient : IAsyncDisposable
         cts.Token.Register(() =>
         {
             try { watcher.Stop(); } catch { }
-            tcs.TrySetResult(false);
+            tcs.TrySetResult(new AdvertWait(false, 0, total, sw.Elapsed));
         });
 
         watcher.Start();
@@ -241,30 +252,42 @@ public sealed class SockClient : IAsyncDisposable
     private async Task TryOpenAsync(CancellationToken ct)
     {
         if (_disposed || _address is null) return;
+        var addr = _address.Value;
         try
         {
-            // WinRT's FromBluetoothAddressAsync returns null until the OS
-            // has cached the device via a recent advertisement — confirmed
-            // on at least two different Windows hosts with different
-            // dongles, so this is a stack-level behaviour, not a dongle
-            // quirk. The vendor app only ever works right after a scan;
-            // after a reboot the socks aren't in the cache yet. Prime by
-            // scanning for the specific MAC first.
-            Logf($"Waiting for advertisement from {FormatMac(_address.Value)} …");
-            var seen = await WaitForMacAdvertAsync(_address.Value, TimeSpan.FromSeconds(25), ct)
-                .ConfigureAwait(false);
-            if (!seen)
+            // Direct open first. If the OS still knows the device (it was
+            // connected earlier, or Windows is still holding the link after a
+            // drop), the sock isn't advertising and a scan would never see it.
+            Logf($"Opening {FormatMac(addr)} …");
+            _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr).AsTask(ct);
+            if (_device is null)
             {
-                Logf("No advertisement in 25 s — will retry.");
-                ScheduleReconnect();
-                return;
+                // Not in the OS cache (typically right after a reboot):
+                // WinRT only returns a device once it has seen an advert.
+                var adv = await WaitForMacAdvertAsync(addr, TimeSpan.FromSeconds(25), ct).ConfigureAwait(false);
+                if (!adv.Seen)
+                {
+                    Logf($"Not in OS cache and no advert in 25 s ({adv.TotalAdverts} BLE adverts from other devices) — will retry.");
+                    ScheduleReconnect();
+                    return;
+                }
+                Logf($"Advert seen after {adv.Elapsed.TotalSeconds:0.0} s (RSSI {adv.Rssi} dBm).");
+                _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr).AsTask(ct)
+                          ?? throw new InvalidOperationException("FromBluetoothAddressAsync returned null after advert");
             }
 
-            Logf($"Connecting to {FormatMac(_address.Value)} …");
-            _device = await BluetoothLEDevice.FromBluetoothAddressAsync(_address.Value).AsTask(ct)
-                      ?? throw new InvalidOperationException("FromBluetoothAddressAsync returned null");
-
             _device.ConnectionStatusChanged += OnConnectionStatusChanged;
+
+            // Ask Windows to keep the link up and reconnect on its own after a
+            // drop. Its background reconnect works where our own advert scan
+            // can't: while the OS is re-establishing the link, the sock stops
+            // advertising.
+            try
+            {
+                _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId).AsTask(ct).ConfigureAwait(false);
+                if (_session is not null) _session.MaintainConnection = true;
+            }
+            catch (Exception ex) { Logf($"GattSession unavailable: {ex.Message}"); }
 
             var svcResult = await _device
                 .GetGattServicesForUuidAsync(SockProtocol.ServiceUuid, BluetoothCacheMode.Uncached)
@@ -304,14 +327,81 @@ public sealed class SockClient : IAsyncDisposable
     {
         if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
         {
-            Logf("Disconnected.");
+            if (_dropped) return;
+            _dropped = true;
+            _droppedAtUtc = DateTime.UtcNow;
+            Logf("Disconnected — waiting for Windows to restore the link.");
             _batteryPollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            // The sock may have power-cycled; force the next reconcile to
+            // resend the target instead of trusting the pre-drop value.
+            LastSentTempC = null;
             ConnectionChanged?.Invoke(this, false);
-            // Keep the device object around until the reconnect pass tears
-            // it down — Windows sometimes recovers the connection on its own
-            // if we don't yank the handle.
+            // Keep the device + session: MaintainConnection makes Windows
+            // reconnect in the background. Only if that hasn't happened in
+            // OsReconnectGrace do we tear down and start over.
+            _watchdog.Change(OsReconnectGrace, Timeout.InfiniteTimeSpan);
+        }
+        else if (sender.ConnectionStatus == BluetoothConnectionStatus.Connected && _dropped)
+        {
+            _ = ResumeAfterOsReconnectAsync();
+        }
+    }
+
+    private static readonly TimeSpan OsReconnectGrace = TimeSpan.FromSeconds(90);
+
+    private async Task ResumeAfterOsReconnectAsync()
+    {
+        await _connectLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!_dropped || _notifyChar is null) return;
+            var down = DateTime.UtcNow - _droppedAtUtc;
+            // The firmware doesn't bond, so the notify subscription is gone
+            // after a reconnect and has to be written again.
+            var cc = await _notifyChar
+                .WriteClientCharacteristicConfigurationDescriptorAsync(
+                    GattClientCharacteristicConfigurationDescriptorValue.Notify)
+                .AsTask().ConfigureAwait(false);
+            if (cc != GattCommunicationStatus.Success)
+            {
+                Logf($"Link back after {down.TotalSeconds:0} s but CCCD re-enable failed ({cc}) — full reconnect.");
+                _dropped = false;
+                await TearDownDeviceAsync().ConfigureAwait(false);
+                ScheduleReconnect();
+                return;
+            }
+            _dropped = false;
+            _watchdog.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            Logf($"Reconnected by Windows after {down.TotalSeconds:0} s.");
+            _batteryPollTimer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
+            ConnectionChanged?.Invoke(this, true);
+        }
+        catch (Exception ex)
+        {
+            Logf($"Resume after reconnect failed: {ex.Message} — full reconnect.");
+            _dropped = false;
+            await TearDownDeviceAsync().ConfigureAwait(false);
             ScheduleReconnect();
         }
+        finally { _connectLock.Release(); }
+    }
+
+    private void OnWatchdog()
+    {
+        if (!_dropped || _disposed || !_reconnectRequested) return;
+        Logf($"Windows didn't restore the link within {OsReconnectGrace.TotalSeconds:0} s — reopening.");
+        _ = Task.Run(async () =>
+        {
+            await _connectLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (!_dropped) return;
+                _dropped = false;
+                await TearDownDeviceAsync().ConfigureAwait(false);
+                await TryOpenAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            finally { _connectLock.Release(); }
+        });
     }
 
     private void ScheduleReconnect()
@@ -352,6 +442,8 @@ public sealed class SockClient : IAsyncDisposable
     private async Task TearDownDeviceAsync()
     {
         _batteryPollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _watchdog.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _dropped = false;
         if (_notifyChar is not null)
         {
             try
@@ -366,6 +458,12 @@ public sealed class SockClient : IAsyncDisposable
             _notifyChar = null;
         }
         _writeChar = null;
+        if (_session is not null)
+        {
+            try { _session.MaintainConnection = false; } catch { }
+            try { _session.Dispose(); } catch { }
+            _session = null;
+        }
         if (_device is not null)
         {
             try { _device.ConnectionStatusChanged -= OnConnectionStatusChanged; } catch { }
@@ -378,8 +476,9 @@ public sealed class SockClient : IAsyncDisposable
     {
         _disposed = true;
         _reconnectRequested = false;
-        try { _batteryPollTimer.Dispose(); } catch { }
         try { await TearDownDeviceAsync().ConfigureAwait(false); } catch { }
+        try { _batteryPollTimer.Dispose(); } catch { }
+        try { _watchdog.Dispose(); } catch { }
         _writeLock.Dispose();
         _connectLock.Dispose();
     }

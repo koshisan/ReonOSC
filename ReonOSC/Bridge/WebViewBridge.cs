@@ -862,6 +862,18 @@ public sealed class WebViewBridge : IDisposable
 
     private void Push(string eventName, object? payload)
     {
+        if (eventName == "log.line" && payload is not null)
+        {
+            try
+            {
+                var el = JsonSerializer.SerializeToElement(payload, JsonOpts);
+                var kind = el.TryGetProperty("kind", out var k) ? k.GetString() ?? "info" : "info";
+                var msg = el.TryGetProperty("msg", out var m) ? m.GetString() ?? "" : "";
+                AppLog.Write(kind, msg);
+            }
+            catch { }
+        }
+
         var envelope = new Dictionary<string, object?> { ["event"] = eventName, ["payload"] = payload };
         var json = JsonSerializer.Serialize(envelope, JsonOpts);
 
