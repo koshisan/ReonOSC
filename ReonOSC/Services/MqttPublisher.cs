@@ -286,6 +286,7 @@ public sealed class MqttPublisher : IAsyncDisposable
                     source = _service.LastResolvedSockL.Source,
                     connected = _service.SockL.IsConnected,
                     battery = _service.SockL.BatteryPercent,
+                    batteryVolts = _service.SockL.BatteryVolts,
                 },
                 r = new
                 {
@@ -293,6 +294,7 @@ public sealed class MqttPublisher : IAsyncDisposable
                     source = _service.LastResolvedSockR.Source,
                     connected = _service.SockR.IsConnected,
                     battery = _service.SockR.BatteryPercent,
+                    batteryVolts = _service.SockR.BatteryVolts,
                 },
             },
             timestamp = DateTime.UtcNow.ToString("o"),
@@ -526,6 +528,22 @@ public sealed class MqttPublisher : IAsyncDisposable
                 unit_of_measurement = "%",
                 device_class = "battery",
                 state_class = "measurement",
+                availability_topic = availabilityTopic,
+                device = sockDevice,
+            }).ConfigureAwait(false);
+
+            // The sock reports cell voltage, not charge; the % above is an
+            // estimate from it, so publish the raw reading as well.
+            await PublishDiscoveryEntityAsync("sensor", $"sock_{side}_battery_voltage", new
+            {
+                name = $"Sock {label} battery voltage",
+                unique_id = $"reonosc_sock_{side}_battery_voltage",
+                state_topic = stateTopic,
+                value_template = $"{{{{ value_json.socks.{side}.batteryVolts if value_json.socks.{side}.batteryVolts is not none else none }}}}",
+                unit_of_measurement = "V",
+                device_class = "voltage",
+                state_class = "measurement",
+                suggested_display_precision = 1,
                 availability_topic = availabilityTopic,
                 device = sockDevice,
             }).ConfigureAwait(false);

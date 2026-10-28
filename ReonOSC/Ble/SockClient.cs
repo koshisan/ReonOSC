@@ -44,9 +44,14 @@ public sealed class SockClient : IAsyncDisposable
     private readonly SemaphoreSlim _connectLock = new(1, 1);
     private readonly System.Threading.Timer _batteryPollTimer;
 
-    /// <summary>Last battery percent reported via FFF1 notify, or null if the
+    /// <summary>Last battery voltage reported via FFF1 notify, or null if the
     /// device hasn't answered a battery query yet (or isn't connected).</summary>
-    public int? BatteryPercent { get; private set; }
+    public double? BatteryVolts => _batteryDeciVolts is int dv ? dv / 10.0 : null;
+
+    /// <summary>Rough charge estimate derived from <see cref="BatteryVolts"/>.</summary>
+    public int? BatteryPercent => _batteryDeciVolts is int dv ? SockProtocol.EstimatePercent(dv) : null;
+
+    private int? _batteryDeciVolts;
 
     /// <summary>Last temperature we successfully wrote to the sock, or null
     /// if nothing has been sent this session. Used by the higher layer to
@@ -174,7 +179,7 @@ public sealed class SockClient : IAsyncDisposable
                 await TearDownDeviceAsync().ConfigureAwait(false);
                 _address = address;
                 LastSentTempC = null;
-                BatteryPercent = null;
+                _batteryDeciVolts = null;
             }
             _reconnectRequested = true;
             await TryOpenAsync(ct).ConfigureAwait(false);
@@ -195,7 +200,7 @@ public sealed class SockClient : IAsyncDisposable
             await TearDownDeviceAsync().ConfigureAwait(false);
             _address = null;
             LastSentTempC = null;
-            BatteryPercent = null;
+            _batteryDeciVolts = null;
             _bindCts.Dispose();
             _bindCts = new CancellationTokenSource();
         }
@@ -454,14 +459,10 @@ public sealed class SockClient : IAsyncDisposable
     private void OnNotify(GattCharacteristic sender, GattValueChangedEventArgs args)
     {
         var data = BufferToBytes(args.CharacteristicValue);
-        var pct = SockProtocol.TryDecodeBatteryNotify(data);
-        if (pct is int p)
+        if (SockProtocol.TryDecodeBatteryDeciVolts(data) is int dv && dv != _batteryDeciVolts)
         {
-            if (BatteryPercent != p)
-            {
-                BatteryPercent = p;
-                BatteryChanged?.Invoke(this, p);
-            }
+            _batteryDeciVolts = dv;
+            BatteryChanged?.Invoke(this, SockProtocol.EstimatePercent(dv));
         }
     }
 

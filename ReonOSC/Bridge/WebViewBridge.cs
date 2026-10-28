@@ -947,14 +947,16 @@ public sealed class WebViewBridge : IDisposable
                 id,
                 state,
                 mac = mac ?? _settings.SockLMac,
-                battery = (int?)_service.SockL.BatteryPercent,
+                battery = _service.SockL.BatteryPercent,
+                batteryVolts = _service.SockL.BatteryVolts,
             },
             "sockR" => new
             {
                 id,
                 state,
                 mac = mac ?? _settings.SockRMac,
-                battery = (int?)_service.SockR.BatteryPercent,
+                battery = _service.SockR.BatteryPercent,
+                batteryVolts = _service.SockR.BatteryVolts,
             },
             _ => new { id, state },
         };

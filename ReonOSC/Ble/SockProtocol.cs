@@ -76,21 +76,33 @@ public static class SockProtocol
         BuildFrame(CmdBattery, ReadOnlySpan<byte>.Empty);
 
     /// <summary>Parse a notify frame coming from the sock. Returns the
-    /// decoded battery percent (0..100) if this is a battery report, else
-    /// null. All non-battery notifies are ignored for now — the vendor app
-    /// only ever logs them too.</summary>
-    public static int? TryDecodeBatteryNotify(ReadOnlySpan<byte> frame)
+    /// battery voltage in tenths of a volt (e.g. 35 = 3.5 V) if this is a
+    /// battery report, else null. The byte is not a percentage: over an hour
+    /// of heating it fell 39 → 34, jittering ±1 as the heater switched,
+    /// while the cuff showed 1–2 of 4 battery LEDs. Non-battery notifies are
+    /// ignored — the vendor app only logs them too.</summary>
+    public static int? TryDecodeBatteryDeciVolts(ReadOnlySpan<byte> frame)
     {
         if (frame.Length < 6) return null;
         if (frame[0] != FrameStartSock || frame[^1] != FrameEnd) return null;
         if (frame[1] != CmdSetTemp) return null;   // battery reports echo cmd=0x01
         if (frame[2] != 1) return null;
-        byte percent = frame[3];
+        byte deciVolts = frame[3];
         // Checksum sanity — malformed frames would be a wire issue worth
-        // catching rather than reporting a bogus percent.
+        // catching rather than reporting a bogus value.
         int sum = (frame[1] + frame[2] + frame[3]) & 0xFF;
         if (sum != frame[4]) return null;
-        if (percent > 100) return null;
-        return percent;
+        // A single Li-ion cell lives between ~2.5 and 4.3 V.
+        if (deciVolts < 25 || deciVolts > 45) return null;
+        return deciVolts;
     }
+
+    // Linear over the range a loaded cell actually spans. Coarse — the
+    // reading only has 0.1 V resolution, so it moves in ~12 % steps.
+    private const int EmptyDeciVolts = 33;
+    private const int FullDeciVolts = 41;
+
+    /// <summary>Rough state-of-charge estimate from the reported voltage.</summary>
+    public static int EstimatePercent(int deciVolts) =>
+        Math.Clamp((deciVolts - EmptyDeciVolts) * 100 / (FullDeciVolts - EmptyDeciVolts), 0, 100);
 }

@@ -385,13 +385,16 @@ function App() {
                   const meta = DEVICE_META[id];
                   const d = devices[id];
                   const st = d.state;
-                  const batText = d.battery != null ? `${d.battery}%` : "";
+                  // Socks report cell voltage; the % is an estimate from it.
+                  const bat = d.battery == null ? null : d.batteryVolts == null
+                    ? <span>{d.battery}%</span>
+                    : <span className="bat" title="Estimated from cell voltage">~{d.battery}%<span className="sub">{d.batteryVolts.toFixed(1)} V</span></span>;
                   return (
                     <div className="tbl-row dev" key={id}>
                       <span className={`stat-dot ${st}`} />
                       <span className="cell-main">{meta.title}<span className="sub">{meta.zone}</span></span>
                       <span className="mono dim">{d.mac || "—"}</span>
-                      <span className="mono dim r">{st === "connected" ? batText : ""}</span>
+                      <span className="mono dim r">{st === "connected" ? bat : ""}</span>
                       <span className={`st-text ${st}`}>{STATE_LABEL[st] || st}</span>
                       <div className="actions">
                         {st === "connected"
