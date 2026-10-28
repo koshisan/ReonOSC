@@ -479,19 +479,47 @@ public sealed class ControlService : IAsyncDisposable
     /// pair-time L/R guess doesn't match the physical socks (which have no
     /// marking and can't be told apart in VR). Updates settings before
     /// re-binding so a crash in the middle still persists the swap.</summary>
-    public async Task SwapSocksAsync()
+    /// <returns>false if a swap was already running and this call was ignored.</returns>
+    public async Task<bool> SwapSocksAsync()
     {
-        var oldL = SockL.Address;
-        var oldR = SockR.Address;
-        (Settings.SockLMac, Settings.SockRMac) = (Settings.SockRMac, Settings.SockLMac);
-        Settings.Save();
+        // A second click while the first swap still waits on a connect attempt
+        // used to interleave with it: settings flipped twice, the live bindings
+        // once, so the next restart had L and R reversed.
+        if (!await _swapLock.WaitAsync(0).ConfigureAwait(false))
+        {
+            Log?.Invoke(this, "Socks: swap already in progress — ignored.");
+            return false;
+        }
+        try
+        {
+            var oldL = SockL.Address ?? TryParseMac(Settings.SockLMac);
+            var oldR = SockR.Address ?? TryParseMac(Settings.SockRMac);
 
-        // Detach both before re-attaching so Windows doesn't end up holding
-        // two handles pointing at the same device for a moment.
-        await SockL.UnbindAsync().ConfigureAwait(false);
-        await SockR.UnbindAsync().ConfigureAwait(false);
-        if (oldR is ulong rAddr) await SockL.BindAsync(rAddr).ConfigureAwait(false);
-        if (oldL is ulong lAddr) await SockR.BindAsync(lAddr).ConfigureAwait(false);
-        Log?.Invoke(this, "Socks: swapped L ↔ R.");
+            // Detach both before re-attaching so Windows doesn't end up holding
+            // two handles pointing at the same device (that showed up as
+            // AccessDenied on FFF2).
+            await SockL.UnbindAsync().ConfigureAwait(false);
+            await SockR.UnbindAsync().ConfigureAwait(false);
+
+            Settings.SockLMac = oldR is ulong r ? SockClient.FormatMac(r) : null;
+            Settings.SockRMac = oldL is ulong l ? SockClient.FormatMac(l) : null;
+            Settings.Save();
+
+            // Don't await the binds: opening can take 25 s+ and the UI should
+            // reflect the swap right away. BindAsync handles its own failures.
+            if (oldR is ulong rAddr) _ = SockL.BindAsync(rAddr);
+            if (oldL is ulong lAddr) _ = SockR.BindAsync(lAddr);
+            Log?.Invoke(this, $"Socks: swapped L ↔ R (L={Settings.SockLMac ?? "—"}, R={Settings.SockRMac ?? "—"}).");
+            return true;
+        }
+        finally { _swapLock.Release(); }
+    }
+
+    private readonly SemaphoreSlim _swapLock = new(1, 1);
+
+    private static ulong? TryParseMac(string? mac)
+    {
+        if (string.IsNullOrWhiteSpace(mac)) return null;
+        try { return SockClient.ParseMac(mac); } catch { return null; }
     }
 }

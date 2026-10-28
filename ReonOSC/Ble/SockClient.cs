@@ -34,6 +34,7 @@ public sealed class SockClient : IAsyncDisposable
     private GattCharacteristic? _writeChar;
     private GattCharacteristic? _notifyChar;
     private volatile bool _dropped;
+    private CancellationTokenSource _bindCts = new();
     private DateTime _droppedAtUtc;
     private readonly System.Threading.Timer _watchdog;
     private ulong? _address;
@@ -187,6 +188,7 @@ public sealed class SockClient : IAsyncDisposable
     public async Task UnbindAsync()
     {
         _reconnectRequested = false;
+        _bindCts.Cancel();
         await _connectLock.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -194,6 +196,8 @@ public sealed class SockClient : IAsyncDisposable
             _address = null;
             LastSentTempC = null;
             BatteryPercent = null;
+            _bindCts.Dispose();
+            _bindCts = new CancellationTokenSource();
         }
         finally { _connectLock.Release(); }
         ConnectionChanged?.Invoke(this, false);
@@ -249,10 +253,15 @@ public sealed class SockClient : IAsyncDisposable
 
     // ---- connection lifecycle --------------------------------------------
 
-    private async Task TryOpenAsync(CancellationToken ct)
+    private async Task TryOpenAsync(CancellationToken outerCt)
     {
         if (_disposed || _address is null) return;
         var addr = _address.Value;
+        // Unbind cancels this so it doesn't have to wait out a 25 s scan or a
+        // slow GATT discovery while holding _connectLock.
+        var bindToken = _bindCts.Token;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(outerCt, bindToken);
+        var ct = linked.Token;
         try
         {
             // Direct open first. If the OS still knows the device (it was
@@ -287,25 +296,9 @@ public sealed class SockClient : IAsyncDisposable
                 _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId).AsTask(ct).ConfigureAwait(false);
                 if (_session is not null) _session.MaintainConnection = true;
             }
-            catch (Exception ex) { Logf($"GattSession unavailable: {ex.Message}"); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { Logf($"GattSession unavailable: {ex.Message}"); }
 
-            var svcResult = await _device
-                .GetGattServicesForUuidAsync(SockProtocol.ServiceUuid, BluetoothCacheMode.Uncached)
-                .AsTask(ct).ConfigureAwait(false);
-            if (svcResult.Status != GattCommunicationStatus.Success || svcResult.Services.Count == 0)
-                throw new InvalidOperationException($"FFF0 service not found: {svcResult.Status}");
-            var svc = svcResult.Services[0];
-
-            _writeChar  = await GetCharAsync(svc, SockProtocol.CharWrite,  ct).ConfigureAwait(false);
-            _notifyChar = await GetCharAsync(svc, SockProtocol.CharNotify, ct).ConfigureAwait(false);
-
-            var ccResult = await _notifyChar
-                .WriteClientCharacteristicConfigurationDescriptorAsync(
-                    GattClientCharacteristicConfigurationDescriptorValue.Notify)
-                .AsTask(ct).ConfigureAwait(false);
-            if (ccResult != GattCommunicationStatus.Success)
-                throw new InvalidOperationException($"FFF1 CCCD enable failed: {ccResult}");
-            _notifyChar.ValueChanged += OnNotify;
+            await AttachGattAsync(ct).ConfigureAwait(false);
 
             Logf("Connected.");
             ConnectionChanged?.Invoke(this, true);
@@ -315,6 +308,10 @@ public sealed class SockClient : IAsyncDisposable
             // overkill for a 10 Ah pack that drains over hours.
             _batteryPollTimer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
         }
+        catch (OperationCanceledException) when (bindToken.IsCancellationRequested)
+        {
+            await TearDownDeviceAsync().ConfigureAwait(false);
+        }
         catch (Exception ex)
         {
             Logf($"Connect failed: {ex.Message}");
@@ -323,11 +320,49 @@ public sealed class SockClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Fetch FFF0/FFF1/FFF2 fresh and subscribe to notifications.
+    /// Used on first connect and again after an OS-side reconnect: once a
+    /// link drops, Windows closes the old GattDeviceService, so the previous
+    /// characteristic objects throw ObjectDisposedException.</summary>
+    private async Task AttachGattAsync(CancellationToken ct)
+    {
+        if (_device is null) throw new InvalidOperationException("no device");
+        if (_notifyChar is not null)
+        {
+            try { _notifyChar.ValueChanged -= OnNotify; } catch { }
+            _notifyChar = null;
+        }
+        _writeChar = null;
+
+        var svcResult = await _device
+            .GetGattServicesForUuidAsync(SockProtocol.ServiceUuid, BluetoothCacheMode.Uncached)
+            .AsTask(ct).ConfigureAwait(false);
+        if (svcResult.Status != GattCommunicationStatus.Success || svcResult.Services.Count == 0)
+            throw new InvalidOperationException($"FFF0 service not found: {svcResult.Status}");
+        var svc = svcResult.Services[0];
+
+        var write  = await GetCharAsync(svc, SockProtocol.CharWrite,  ct).ConfigureAwait(false);
+        var notify = await GetCharAsync(svc, SockProtocol.CharNotify, ct).ConfigureAwait(false);
+
+        var cc = await notify
+            .WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue.Notify)
+            .AsTask(ct).ConfigureAwait(false);
+        if (cc != GattCommunicationStatus.Success)
+            throw new InvalidOperationException($"FFF1 CCCD enable failed: {cc}");
+        notify.ValueChanged += OnNotify;
+
+        // Assigned last: a null _writeChar marks "still attaching", which
+        // OnConnectionStatusChanged uses to ignore status flaps mid-setup.
+        _notifyChar = notify;
+        _writeChar = write;
+    }
+
     private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args)
     {
         if (sender.ConnectionStatus == BluetoothConnectionStatus.Disconnected)
         {
-            if (_dropped) return;
+            if (_dropped || _writeChar is null) return;
             _dropped = true;
             _droppedAtUtc = DateTime.UtcNow;
             Logf("Disconnected — waiting for Windows to restore the link.");
@@ -354,22 +389,11 @@ public sealed class SockClient : IAsyncDisposable
         await _connectLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (!_dropped || _notifyChar is null) return;
+            if (!_dropped || _device is null) return;
             var down = DateTime.UtcNow - _droppedAtUtc;
-            // The firmware doesn't bond, so the notify subscription is gone
-            // after a reconnect and has to be written again.
-            var cc = await _notifyChar
-                .WriteClientCharacteristicConfigurationDescriptorAsync(
-                    GattClientCharacteristicConfigurationDescriptorValue.Notify)
-                .AsTask().ConfigureAwait(false);
-            if (cc != GattCommunicationStatus.Success)
-            {
-                Logf($"Link back after {down.TotalSeconds:0} s but CCCD re-enable failed ({cc}) — full reconnect.");
-                _dropped = false;
-                await TearDownDeviceAsync().ConfigureAwait(false);
-                ScheduleReconnect();
-                return;
-            }
+            // Fresh GATT objects (the old ones are closed after a drop) and a
+            // fresh notify subscription (the firmware doesn't bond).
+            await AttachGattAsync(_bindCts.Token).ConfigureAwait(false);
             _dropped = false;
             _watchdog.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             Logf($"Reconnected by Windows after {down.TotalSeconds:0} s.");
@@ -407,17 +431,19 @@ public sealed class SockClient : IAsyncDisposable
     private void ScheduleReconnect()
     {
         if (!_reconnectRequested || _disposed) return;
+        // Tied to the current binding: an unbind (e.g. a swap) cancels it, so
+        // a retry planned for the old binding can't become a second retry
+        // chain next to the new one.
+        var bindToken = _bindCts.Token;
         _ = Task.Run(async () =>
         {
-            // Simple fixed backoff. Windows will internally keep trying to
-            // re-attach to the known MAC — we just drive the retry cadence
-            // and surface progress to the log.
-            await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            try { await Task.Delay(TimeSpan.FromSeconds(5), bindToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
             if (_disposed || !_reconnectRequested || IsConnected) return;
             await _connectLock.WaitAsync().ConfigureAwait(false);
             try
             {
-                if (_disposed || !_reconnectRequested || IsConnected) return;
+                if (_disposed || !_reconnectRequested || IsConnected || bindToken.IsCancellationRequested) return;
                 await TearDownDeviceAsync().ConfigureAwait(false);
                 await TryOpenAsync(CancellationToken.None).ConfigureAwait(false);
             }
@@ -476,7 +502,11 @@ public sealed class SockClient : IAsyncDisposable
     {
         _disposed = true;
         _reconnectRequested = false;
+        try { _bindCts.Cancel(); } catch { }
+        await _connectLock.WaitAsync().ConfigureAwait(false);
         try { await TearDownDeviceAsync().ConfigureAwait(false); } catch { }
+        finally { _connectLock.Release(); }
+        try { _bindCts.Dispose(); } catch { }
         try { _batteryPollTimer.Dispose(); } catch { }
         try { _watchdog.Dispose(); } catch { }
         _writeLock.Dispose();
