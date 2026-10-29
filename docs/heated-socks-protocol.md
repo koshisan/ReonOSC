@@ -100,6 +100,16 @@ of 4 battery LEDs. That fits a single Li-ion cell at 3.9 → 3.4 V. ReonOSC
 reports the voltage and a rough linear estimate (3.3 V = 0 %,
 4.1 V = 100 %), which moves in ~12 % steps at this resolution.
 
+The vendor app shows only a bar per sock, with five steps (from app code):
+
+| `VV` (decimal) | App bar |
+|---|---|
+| ≥ 39 | 100 % |
+| 37–38 | 75 % |
+| 35–36 | 50 % |
+| 30–34 | 25 % |
+| < 30 | 0 % (red) |
+
 The app treats every notify with byte 1 = `01` as a battery report and only
 logs everything else. During testing nothing else arrived: **the socks do
 not report their actual temperature.**
