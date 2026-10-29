@@ -97,12 +97,15 @@ public static class SockProtocol
         return deciVolts;
     }
 
-    // Linear over the range a loaded cell actually spans. Coarse — the
-    // reading only has 0.1 V resolution, so it moves in ~12 % steps.
-    private const int EmptyDeciVolts = 33;
-    private const int FullDeciVolts = 41;
-
-    /// <summary>Rough state-of-charge estimate from the reported voltage.</summary>
-    public static int EstimatePercent(int deciVolts) =>
-        Math.Clamp((deciVolts - EmptyDeciVolts) * 100 / (FullDeciVolts - EmptyDeciVolts), 0, 100);
+    /// <summary>State-of-charge estimate from the reported voltage, using the
+    /// same five steps as the vendor app's battery bar (read from its code),
+    /// so ReonOSC shows what the app shows.</summary>
+    public static int EstimatePercent(int deciVolts) => deciVolts switch
+    {
+        >= 39 => 100,
+        >= 37 => 75,
+        >= 35 => 50,
+        >= 30 => 25,
+        _ => 0,
+    };
 }

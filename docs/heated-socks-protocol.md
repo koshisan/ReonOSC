@@ -97,10 +97,8 @@ The battery byte is not a percentage, even though the vendor app code
 calls it one. Over an hour of heating it fell from 39 to 34 on both socks,
 jittering ±1 as the heater switched (load sag), while the cuff showed 1–2
 of 4 battery LEDs. That fits a single Li-ion cell at 3.9 → 3.4 V. ReonOSC
-reports the voltage and a rough linear estimate (3.3 V = 0 %,
-4.1 V = 100 %), which moves in ~12 % steps at this resolution.
-
-The vendor app shows only a bar per sock, with five steps (from app code):
+reports the voltage and a percentage using the same five steps as the
+vendor app's battery bar (from app code):
 
 | `VV` (decimal) | App bar |
 |---|---|
