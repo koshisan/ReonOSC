@@ -18,6 +18,10 @@ public sealed class TrayContext : ApplicationContext
     private readonly MainForm _form;
     private readonly NotifyIcon _tray;
     private readonly StatusIcons _icons = new();
+    private readonly EventWaitHandle _quitEvent;
+    private readonly EventWaitHandle _showEvent;
+    private readonly RegisteredWaitHandle _quitWait;
+    private readonly RegisteredWaitHandle _showWait;
 
     // Boot trace — surfaces phase markers through three channels so a silent
     // "no tray icon, no error" startup is always diagnosable:
@@ -141,6 +145,16 @@ public sealed class TrayContext : ApplicationContext
         Trace($"deciding ShowForm — StartMinimised={_settings.StartMinimised}");
         if (!_settings.StartMinimised)
             ShowForm();
+
+        // `ReonOSC.exe --quit` and a second launch signal these (see Program).
+        _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.QuitEventName);
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, Program.ShowEventName);
+        _quitWait = ThreadPool.RegisterWaitForSingleObject(_quitEvent,
+            (_, _) => { try { _form.BeginInvoke(new Action(ExitThread)); } catch { } },
+            null, Timeout.Infinite, executeOnlyOnce: true);
+        _showWait = ThreadPool.RegisterWaitForSingleObject(_showEvent,
+            (_, _) => { try { _form.BeginInvoke(new Action(ShowForm)); } catch { } },
+            null, Timeout.Infinite, executeOnlyOnce: false);
         Trace("--- TrayContext ctor end ---");
 
         // Auto-connect is now triggered by the bridge when the UI signals
@@ -157,14 +171,31 @@ public sealed class TrayContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        Trace("--- shutdown begin ---");
+        try { _quitWait.Unregister(null); _showWait.Unregister(null); } catch { }
         try
         {
             _tray.Visible = false;
             _tray.Dispose();
         }
         catch { }
-        try { if (_mqtt is not null) _ = _mqtt.DisposeAsync(); } catch { }
-        try { _ = _service.DisposeAsync(); } catch { }
+        // Wait (bounded) instead of fire-and-forget: the process used to exit
+        // before the socks got their off command and before the BLE links
+        // were closed cleanly. Run off the UI thread so continuations can't
+        // deadlock against it.
+        try
+        {
+            if (_mqtt is not null)
+                Task.Run(async () => await _mqtt.DisposeAsync()).Wait(TimeSpan.FromSeconds(3));
+        }
+        catch { }
+        try
+        {
+            var done = Task.Run(async () => await _service.DisposeAsync()).Wait(TimeSpan.FromSeconds(8));
+            Trace(done ? "service disposed (socks off)" : "service dispose timed out");
+        }
+        catch (Exception ex) { Trace($"service dispose failed: {ex.Message}"); }
+        try { _quitEvent.Dispose(); _showEvent.Dispose(); } catch { }
         try { _icons.Dispose(); } catch { }
         base.ExitThreadCore();
     }

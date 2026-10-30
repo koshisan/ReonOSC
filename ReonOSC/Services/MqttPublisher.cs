@@ -89,6 +89,8 @@ public sealed class MqttPublisher : IAsyncDisposable
             _service.SockR.ConnectionChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
             _service.SockL.BatteryChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
             _service.SockR.BatteryChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.SockL.HealthChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
+            _service.SockR.HealthChanged += (_, _) => { try { _ = PublishStateAsync(); } catch { } };
         }
         catch (Exception ex)
         {
@@ -287,6 +289,7 @@ public sealed class MqttPublisher : IAsyncDisposable
                     connected = _service.SockL.IsConnected,
                     battery = _service.SockL.BatteryPercent,
                     batteryVolts = _service.SockL.BatteryVolts,
+                    health = _service.SockL.Health.ToString().ToLowerInvariant(),
                 },
                 r = new
                 {
@@ -295,6 +298,7 @@ public sealed class MqttPublisher : IAsyncDisposable
                     connected = _service.SockR.IsConnected,
                     battery = _service.SockR.BatteryPercent,
                     batteryVolts = _service.SockR.BatteryVolts,
+                    health = _service.SockR.Health.ToString().ToLowerInvariant(),
                 },
             },
             timestamp = DateTime.UtcNow.ToString("o"),
@@ -528,6 +532,20 @@ public sealed class MqttPublisher : IAsyncDisposable
                 unit_of_measurement = "%",
                 device_class = "battery",
                 state_class = "measurement",
+                availability_topic = availabilityTopic,
+                device = sockDevice,
+            }).ConfigureAwait(false);
+
+            // unbound / connecting / connected / stuck / absent. "stuck" is the
+            // state that needs a battery unplug, so an HA automation can
+            // notify on it.
+            await PublishDiscoveryEntityAsync("sensor", $"sock_{side}_status", new
+            {
+                name = $"Sock {label} status",
+                unique_id = $"reonosc_sock_{side}_status",
+                state_topic = stateTopic,
+                value_template = $"{{{{ value_json.socks.{side}.health }}}}",
+                icon = "mdi:bluetooth-connect",
                 availability_topic = availabilityTopic,
                 device = sockDevice,
             }).ConfigureAwait(false);

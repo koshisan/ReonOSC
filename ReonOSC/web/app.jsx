@@ -162,7 +162,7 @@ function App() {
   const [sockR, setSockR] = useState({ target: 0, source: "Off" });
 
   // Sock config + manual targets
-  const [cfg, setCfgState] = useState({ baselineOn: true, baseline: 30, heatTouch: 55, heatMax: 60, touchMax: 45, limit: 60 });
+  const [cfg, setCfgState] = useState({ baselineOn: true, baseline: 30, heatTouch: 55, heatMax: 60, touchMax: 45, limit: 60, deadManMinutes: 20 });
   const [mSock, setMSock] = useState({ L: 40, R: 40 });
 
   // Manual override
@@ -201,6 +201,7 @@ function App() {
         heatMax:    s.socks.heatMax    ?? 60,
         touchMax:   s.socks.touchMax   ?? 45,
         limit:      s.socks.limit      ?? 60,
+        deadManMinutes: s.socks.deadManMinutes ?? 20,
       });
       setMSock({ L: s.socks.manualL ?? 40, R: s.socks.manualR ?? 40 });
     }
@@ -288,6 +289,7 @@ function App() {
         heatMax:    next.heatMax,
         touchMax:   next.touchMax,
         limit:      next.limit,
+        deadManMinutes: next.deadManMinutes,
       });
       return next;
     });
@@ -395,7 +397,9 @@ function App() {
                       <span className="cell-main">{meta.title}<span className="sub">{meta.zone}</span></span>
                       <span className="mono dim">{d.mac || "—"}</span>
                       <span className="mono dim r">{st === "connected" ? bat : ""}</span>
-                      <span className={`st-text ${st}`}>{STATE_LABEL[st] || st}</span>
+                      <span className={`st-text ${d.health === "stuck" ? "stuck" : st}`}>
+                        {d.health === "stuck" ? "Stuck" : d.health === "absent" ? "Not found" : STATE_LABEL[st] || st}
+                      </span>
                       <div className="actions">
                         {st === "connected"
                           ? <button className="btn sm" onClick={() => disconnect(id)}><Icon name="unlink" />Disconnect</button>
@@ -406,6 +410,13 @@ function App() {
                   );
                 })}
               </div>
+              {["sockL", "sockR"].filter((id) => devices[id].health === "stuck" || devices[id].health === "absent").map((id) => (
+                <div className="note warn" key={id}>
+                  {devices[id].health === "stuck"
+                    ? <><strong>{DEVICE_META[id].title}</strong> is advertising but refuses every connection. Unplug its battery for 5 s and plug it back in.</>
+                    : <><strong>{DEVICE_META[id].title}</strong> isn't sending anything: switched off, battery flat, or out of range.</>}
+                </div>
+              ))}
               <div className="inline-bar sock-swap-bar">
                 <span className="dim">Left ↔ right mixed up?</span>
                 <button className="btn sm"
@@ -469,6 +480,14 @@ function App() {
               </Row>
               <Row label={<span className="limit-label">Max temperature</span>} sub="hard limit">
                 <TempSlider value={cfg.limit} onChange={(v) => setCfg("limit", Math.max(30, v))} danger />
+              </Row>
+              <Row label="Auto-off" sub="if the link is lost">
+                <select className="input mono" value={cfg.deadManMinutes}
+                        onChange={(e) => setCfg("deadManMinutes", Number(e.target.value))}>
+                  {[0, 1, 5, 10, 20, 30, 60].map((m) => (
+                    <option key={m} value={m}>{m === 0 ? "off" : `after ${m} min`}</option>
+                  ))}
+                </select>
               </Row>
             </>)}
 

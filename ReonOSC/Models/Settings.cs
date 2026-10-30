@@ -80,6 +80,12 @@ public sealed class Settings
     public int ManualSockL { get; set; } = 40;
     public int ManualSockR { get; set; } = 40;
 
+    /// <summary>Dead-man switch: minutes after which a sock switches its
+    /// heating off by itself unless ReonOSC keeps refreshing its timer, i.e.
+    /// when the link drops or the app dies. 0 disables. The vendor app treats
+    /// anything up to 15 as "no timer", so values that low are untested.</summary>
+    public int SockDeadManMinutes { get; set; } = 20;
+
     // MQTT publish — pushes the current state (mode/level/source, connection,
     // telemetry) to a broker so Home Assistant can mirror the device and react
     // (e.g. turn on the AC when we go into Cool).

@@ -84,6 +84,8 @@ public sealed class ControlService : IAsyncDisposable
         Reon.Log += (_, msg) => Log?.Invoke(this, msg);
         SockL.Log += (_, msg) => Log?.Invoke(this, msg);
         SockR.Log += (_, msg) => Log?.Invoke(this, msg);
+        SockL.DeadManMinutes = settings.SockDeadManMinutes;
+        SockR.DeadManMinutes = settings.SockDeadManMinutes;
         PfSignal.Log += (_, msg) => Log?.Invoke(this, msg);
 
         // Plug the PFSignal reader directly into the resolver: every time the
@@ -164,6 +166,8 @@ public sealed class ControlService : IAsyncDisposable
     public void ApplySettings(Settings settings)
     {
         Settings = settings;
+        SockL.DeadManMinutes = settings.SockDeadManMinutes;
+        SockR.DeadManMinutes = settings.SockDeadManMinutes;
         if (Osc.IsRunning && Osc.Port != settings.OscPort)
         {
             Osc.Stop();

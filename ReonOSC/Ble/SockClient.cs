@@ -75,6 +75,8 @@ public sealed class SockClient : IAsyncDisposable
             Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _watchdog = new System.Threading.Timer(_ => OnWatchdog(), null,
             Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _keepAliveTimer = new System.Threading.Timer(_ => _ = KeepAliveAsync(), null,
+            Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
     private string Tag => SockSide == Side.Left ? "SockL" : "SockR";
@@ -183,6 +185,7 @@ public sealed class SockClient : IAsyncDisposable
                 _batteryDeciVolts = null;
             }
             _reconnectRequested = true;
+            SetHealth(LinkHealth.Connecting);
             await TryOpenAsync(ct).ConfigureAwait(false);
         }
         finally { _connectLock.Release(); }
@@ -202,10 +205,13 @@ public sealed class SockClient : IAsyncDisposable
             _address = null;
             LastSentTempC = null;
             _batteryDeciVolts = null;
+            _failStreak = 0;
             _bindCts.Dispose();
             _bindCts = new CancellationTokenSource();
         }
         finally { _connectLock.Release(); }
+        StopPresenceWatch();
+        SetHealth(LinkHealth.Unbound);
         ConnectionChanged?.Invoke(this, false);
     }
 
@@ -215,36 +221,92 @@ public sealed class SockClient : IAsyncDisposable
     /// Dropped silently (returns false) if the socket isn't connected — the
     /// resolver will retry on the next state change.
     /// </summary>
-    public async Task<bool> SetTemperatureAsync(byte tempC, CancellationToken ct = default)
+    public Task<bool> SetTemperatureAsync(byte tempC, CancellationToken ct = default) =>
+        SetTemperatureCoreAsync(tempC, TimeSpan.Zero, ct);
+
+    /// <summary>Unlike a normal set, waits for an in-flight write instead of
+    /// skipping: this is the shutdown path, there is no next reconcile.</summary>
+    public Task<bool> TurnOffAsync(CancellationToken ct = default) =>
+        SetTemperatureCoreAsync(0, TimeSpan.FromSeconds(2), ct);
+
+    private async Task<bool> SetTemperatureCoreAsync(byte tempC, TimeSpan lockWait, CancellationToken ct)
     {
         if (!IsConnected) return false;
         byte normalised = tempC == 0 ? (byte)0
                         : (byte)Math.Clamp(tempC, SockProtocol.TempMin, SockProtocol.TempMax);
         if (LastSentTempC == normalised) return true;
 
-        if (!await _writeLock.WaitAsync(0, ct).ConfigureAwait(false)) return false;
+        if (!await WriteFrameAsync(SockProtocol.BuildSetTemperature(normalised), lockWait, ct).ConfigureAwait(false))
+            return false;
+        LastSentTempC = normalised;
+        Logf(normalised == 0 ? "Set OFF." : $"Set {normalised} °C.");
+        return true;
+    }
+
+    /// <summary>Serialized write to FFF2. Returns false if the lock wasn't
+    /// free within <paramref name="lockWait"/> or the write failed.</summary>
+    private async Task<bool> WriteFrameAsync(byte[] frame, TimeSpan lockWait, CancellationToken ct)
+    {
+        if (!await _writeLock.WaitAsync(lockWait, ct).ConfigureAwait(false)) return false;
         try
         {
             if (_writeChar is null) return false;
-            var frame = SockProtocol.BuildSetTemperature(normalised);
-            try
-            {
-                await WriteAsync(_writeChar, frame, ct).ConfigureAwait(false);
-                LastSentTempC = normalised;
-                Logf(normalised == 0 ? "Set OFF." : $"Set {normalised} °C.");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Logf($"Write failed: {ex.Message}");
-                return false;
-            }
+            await WriteAsync(_writeChar, frame, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logf($"Write failed: {ex.Message}");
+            return false;
         }
         finally { _writeLock.Release(); }
     }
 
-    public Task<bool> TurnOffAsync(CancellationToken ct = default) =>
-        SetTemperatureAsync(0, ct);
+    // ---- dead-man keep-alive ----------------------------------------------
+
+    /// <summary>Minutes after which the sock's own timer switches heating off
+    /// unless we refresh it; 0 disables. If the link drops or the app dies, the
+    /// sock then stops heating by itself instead of holding its last target.</summary>
+    public int DeadManMinutes
+    {
+        get => _deadManMinutes;
+        set
+        {
+            var v = Math.Clamp(value, 0, 255);
+            if (v == _deadManMinutes) return;
+            _deadManMinutes = v;
+            if (IsConnected) StartKeepAlive();
+        }
+    }
+    private int _deadManMinutes;
+    private readonly System.Threading.Timer _keepAliveTimer;
+
+    // Refresh three times per dead-man window so one missed write can't let
+    // it expire while we're connected; at least every 15 s, at most every 5 min.
+    private TimeSpan KeepAliveInterval => _deadManMinutes == 0
+        ? TimeSpan.FromMinutes(5)
+        : TimeSpan.FromSeconds(Math.Clamp(_deadManMinutes * 60 / 3, 15, 300));
+
+    private void StartKeepAlive() =>
+        _keepAliveTimer.Change(TimeSpan.Zero, KeepAliveInterval);
+
+    private void StopKeepAlive() =>
+        _keepAliveTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+
+    private async Task KeepAliveAsync()
+    {
+        if (!IsConnected) return;
+        // Re-arm the timer (it restarts on every write, if the firmware
+        // behaves like the vendor app expects), then resend the target: if
+        // the timer or the cuff button changed the sock's state behind our
+        // back, the resolver would otherwise never notice, since it only
+        // writes on change.
+        await WriteFrameAsync(SockProtocol.BuildTimer((byte)_deadManMinutes), TimeSpan.FromSeconds(2), CancellationToken.None)
+            .ConfigureAwait(false);
+        if (LastSentTempC is byte t)
+            await WriteFrameAsync(SockProtocol.BuildSetTemperature(t), TimeSpan.FromSeconds(2), CancellationToken.None)
+                .ConfigureAwait(false);
+    }
 
     private async Task TryQueryBatteryAsync()
     {
@@ -289,6 +351,7 @@ public sealed class SockClient : IAsyncDisposable
                     return;
                 }
                 Logf($"Advert seen after {adv.Elapsed.TotalSeconds:0.0} s (RSSI {adv.Rssi} dBm).");
+                _lastAdvertUtc = DateTime.UtcNow;
                 _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr).AsTask(ct)
                           ?? throw new InvalidOperationException("FromBluetoothAddressAsync returned null after advert");
             }
@@ -315,8 +378,11 @@ public sealed class SockClient : IAsyncDisposable
                 : $"Connected after {_failStreak} failed attempts ({(DateTime.UtcNow - _streakStartUtc).TotalSeconds:0} s).");
             _failStreak = 0;
             _connectedAtUtc = DateTime.UtcNow;
+            StopPresenceWatch();
             LogLinkParameters("link");
+            SetHealth(LinkHealth.Connected);
             ConnectionChanged?.Invoke(this, true);
+            StartKeepAlive();
 
             // Kick a battery query right away so the UI gets a value fast,
             // then poll every 30 s. The vendor app polls at 3 s which is
@@ -344,9 +410,67 @@ public sealed class SockClient : IAsyncDisposable
     {
         _failStreak++;
         if (_failStreak == 1)
+        {
             Logf($"Connect failed: {reason} — retrying continuously.");
+            StartPresenceWatch();
+        }
         else if (_failStreak % 10 == 0)
             Logf($"Still not connected after {_failStreak} attempts ({(DateTime.UtcNow - _streakStartUtc).TotalSeconds:0} s); last: {reason}");
+        EvaluateHealth();
+    }
+
+    // ---- stuck / absent detection -----------------------------------------
+
+    /// <summary>What the UI and HA show while not connected. Stuck = the sock
+    /// advertises but has refused every connection for a while; field tests
+    /// showed only unplugging its battery for a few seconds clears that.
+    /// Absent = no adverts at all: off, flat, or out of range.</summary>
+    public enum LinkHealth { Unbound, Connecting, Connected, Stuck, Absent }
+
+    public LinkHealth Health { get; private set; } = LinkHealth.Unbound;
+    public event EventHandler<LinkHealth>? HealthChanged;
+
+    private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan AdvertRecent = TimeSpan.FromSeconds(90);
+    private BluetoothLEAdvertisementWatcher? _presenceWatcher;
+    private DateTime _lastAdvertUtc;
+
+    private void EvaluateHealth()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _streakStartUtc < StuckAfter) SetHealth(LinkHealth.Connecting);
+        else if (now - _lastAdvertUtc < AdvertRecent) SetHealth(LinkHealth.Stuck);
+        else SetHealth(LinkHealth.Absent);
+    }
+
+    private void SetHealth(LinkHealth h)
+    {
+        if (h == Health) return;
+        Health = h;
+        if (h == LinkHealth.Stuck)
+            Logf("Advertising but refusing connections for 2+ min — unplug its battery for 5 s.");
+        else if (h == LinkHealth.Absent)
+            Logf("No adverts for 90+ s — sock off, battery flat or out of range.");
+        HealthChanged?.Invoke(this, h);
+    }
+
+    // Passive, so it costs the radio less than the active scans used for
+    // discovery; it only needs to notice that the sock is still sending.
+    private void StartPresenceWatch()
+    {
+        if (_presenceWatcher is not null || _address is null) return;
+        var mac = _address.Value;
+        var w = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Passive };
+        w.Received += (_, a) => { if (a.BluetoothAddress == mac) _lastAdvertUtc = DateTime.UtcNow; };
+        try { w.Start(); _presenceWatcher = w; }
+        catch (Exception ex) { Logf($"Presence watcher unavailable: {ex.Message}"); }
+    }
+
+    private void StopPresenceWatch()
+    {
+        var w = _presenceWatcher;
+        _presenceWatcher = null;
+        if (w is not null) try { w.Stop(); } catch { }
     }
 
     /// <summary>Log the negotiated connection interval, slave latency,
@@ -417,6 +541,8 @@ public sealed class SockClient : IAsyncDisposable
             var connectedFor = DateTime.UtcNow - _connectedAtUtc;
             Logf($"Disconnected after {connectedFor.TotalMinutes:0.0} min connected — reconnecting.");
             _batteryPollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            StopKeepAlive();
+            SetHealth(LinkHealth.Connecting);
             // The sock may have power-cycled; force the next reconcile to
             // resend the target instead of trusting the pre-drop value.
             LastSentTempC = null;
@@ -457,7 +583,9 @@ public sealed class SockClient : IAsyncDisposable
             Logf($"Reconnected by Windows after {down.TotalSeconds:0} s.");
             _connectedAtUtc = DateTime.UtcNow;
             _batteryPollTimer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
+            SetHealth(LinkHealth.Connected);
             ConnectionChanged?.Invoke(this, true);
+            StartKeepAlive();
         }
         catch (Exception ex)
         {
@@ -545,6 +673,7 @@ public sealed class SockClient : IAsyncDisposable
     private async Task TearDownDeviceAsync()
     {
         _batteryPollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        StopKeepAlive();
         _watchdog.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _dropped = false;
         // Unsubscribe on the sock only while the link is up: on a dropped link
@@ -588,8 +717,10 @@ public sealed class SockClient : IAsyncDisposable
         try { await TearDownDeviceAsync().ConfigureAwait(false); } catch { }
         finally { _connectLock.Release(); }
         try { _bindCts.Dispose(); } catch { }
+        StopPresenceWatch();
         try { _batteryPollTimer.Dispose(); } catch { }
         try { _watchdog.Dispose(); } catch { }
+        try { _keepAliveTimer.Dispose(); } catch { }
         _writeLock.Dispose();
         _connectLock.Dispose();
     }

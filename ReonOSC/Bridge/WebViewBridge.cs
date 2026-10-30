@@ -70,10 +70,13 @@ public sealed class WebViewBridge : IDisposable
             PushZones();
         };
         _service.SockTargetChanged += (_, _) => PushZones();
-        _service.SockL.ConnectionChanged += (_, up) => PushDeviceState("sockL", up ? "connected" : "disconnected");
-        _service.SockR.ConnectionChanged += (_, up) => PushDeviceState("sockR", up ? "connected" : "disconnected");
+        // A drop isn't "disconnected": the client is already reconnecting.
+        _service.SockL.ConnectionChanged += (_, up) => PushDeviceState("sockL", up ? "connected" : SockState(_service.SockL.Health));
+        _service.SockR.ConnectionChanged += (_, up) => PushDeviceState("sockR", up ? "connected" : SockState(_service.SockR.Health));
         _service.SockL.BatteryChanged += (_, _) => PushDeviceState("sockL",
             _service.SockL.IsConnected ? "connected" : "disconnected");
+        _service.SockL.HealthChanged += (_, h) => PushDeviceState("sockL", SockState(h));
+        _service.SockR.HealthChanged += (_, h) => PushDeviceState("sockR", SockState(h));
         _service.SockR.BatteryChanged += (_, _) => PushDeviceState("sockR",
             _service.SockR.IsConnected ? "connected" : "disconnected");
         _service.Reon.TelemetryReceived += (_, t) => Push("telemetry", new
@@ -234,6 +237,7 @@ public sealed class WebViewBridge : IDisposable
                 limit = _settings.SockLimit,
                 manualL = _settings.ManualSockL,
                 manualR = _settings.ManualSockR,
+                deadManMinutes = _settings.SockDeadManMinutes,
             },
             mqtt = new
             {
@@ -714,6 +718,7 @@ public sealed class WebViewBridge : IDisposable
         SetInt("heatMax",    v => _settings.SockHeatMax    = v, SockProtocol.TempMin, SockProtocol.TempMax);
         SetInt("touchMax",   v => _settings.SockTouchMax   = v, SockProtocol.TempMin, SockProtocol.TempMax);
         SetInt("limit",      v => _settings.SockLimit      = v, SockProtocol.TempMin, SockProtocol.TempMax);
+        SetInt("deadManMinutes", v => _settings.SockDeadManMinutes = v, 0, 120);
 
         // Lowering the limit should drag every other target down with it so
         // the UI's "every value ≤ limit" invariant can't be violated by a
@@ -726,7 +731,11 @@ public sealed class WebViewBridge : IDisposable
         if (_settings.ManualSockL   > limit) _settings.ManualSockL   = limit;
         if (_settings.ManualSockR   > limit) _settings.ManualSockR   = limit;
 
-        if (anyChange) _settings.Save();
+        if (anyChange)
+        {
+            _settings.Save();
+            _service.ApplySettings(_settings);
+        }
         await _service.ReconcileAsync();
     }
 
@@ -923,6 +932,13 @@ public sealed class WebViewBridge : IDisposable
         });
     }
 
+    private static string SockState(SockClient.LinkHealth h) => h switch
+    {
+        SockClient.LinkHealth.Connected => "connected",
+        SockClient.LinkHealth.Unbound => "disconnected",
+        _ => "connecting",
+    };
+
     /// <summary>v3 scoped device event: {id, state, mac, battery, model?, caps?}.
     /// Model/caps are only meaningful for the reon and are included on reon
     /// pushes; left out for the socks.</summary>
@@ -949,6 +965,7 @@ public sealed class WebViewBridge : IDisposable
                 mac = mac ?? _settings.SockLMac,
                 battery = _service.SockL.BatteryPercent,
                 batteryVolts = _service.SockL.BatteryVolts,
+                health = _service.SockL.Health.ToString().ToLowerInvariant(),
             },
             "sockR" => new
             {
@@ -957,6 +974,7 @@ public sealed class WebViewBridge : IDisposable
                 mac = mac ?? _settings.SockRMac,
                 battery = _service.SockR.BatteryPercent,
                 batteryVolts = _service.SockR.BatteryVolts,
+                health = _service.SockR.Health.ToString().ToLowerInvariant(),
             },
             _ => new { id, state },
         };
