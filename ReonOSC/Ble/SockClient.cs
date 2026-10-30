@@ -380,6 +380,7 @@ public sealed class SockClient : IAsyncDisposable
             _connectedAtUtc = DateTime.UtcNow;
             StopPresenceWatch();
             LogLinkParameters("link");
+            RequestLatencyZero();
             SetHealth(LinkHealth.Connected);
             ConnectionChanged?.Invoke(this, true);
             StartKeepAlive();
@@ -430,8 +431,11 @@ public sealed class SockClient : IAsyncDisposable
     public LinkHealth Health { get; private set; } = LinkHealth.Unbound;
     public event EventHandler<LinkHealth>? HealthChanged;
 
-    private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan AdvertRecent = TimeSpan.FromSeconds(90);
+    // Ordinary reconnects of the weaker sock took up to ~2 min in the field,
+    // so 2 min flagged healthy-but-slow reconnects. Its adverts come only
+    // every 10–40 s, hence the long "recent" window.
+    private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan AdvertRecent = TimeSpan.FromMinutes(3);
     private BluetoothLEAdvertisementWatcher? _presenceWatcher;
     private DateTime _lastAdvertUtc;
 
@@ -448,19 +452,19 @@ public sealed class SockClient : IAsyncDisposable
         if (h == Health) return;
         Health = h;
         if (h == LinkHealth.Stuck)
-            Logf("Advertising but refusing connections for 2+ min — unplug its battery for 5 s.");
+            Logf("Advertising but no connection for 5+ min.");
         else if (h == LinkHealth.Absent)
-            Logf("No adverts for 90+ s — sock off, battery flat or out of range.");
+            Logf("No adverts for 3+ min — sock off, battery flat or out of range.");
         HealthChanged?.Invoke(this, h);
     }
 
-    // Passive, so it costs the radio less than the active scans used for
-    // discovery; it only needs to notice that the sock is still sending.
+    // Active: a passive scan missed enough of the sock's rare adverts to
+    // report it absent while it was in fact advertising.
     private void StartPresenceWatch()
     {
         if (_presenceWatcher is not null || _address is null) return;
         var mac = _address.Value;
-        var w = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Passive };
+        var w = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
         w.Received += (_, a) => { if (a.BluetoothAddress == mac) _lastAdvertUtc = DateTime.UtcNow; };
         try { w.Start(); _presenceWatcher = w; }
         catch (Exception ex) { Logf($"Presence watcher unavailable: {ex.Message}"); }
@@ -559,6 +563,31 @@ public sealed class SockClient : IAsyncDisposable
         }
     }
 
+    private BluetoothLEPreferredConnectionParametersRequest? _paramsRequest;
+
+    /// <summary>
+    /// Right after connecting, the socks negotiate interval 25–30 ms with
+    /// slave latency 10, i.e. they may sleep through ten connection events
+    /// and listen only every ~330 ms. One of them then dropped after 42–96 s,
+    /// every time, with or without heating: the pattern of a sleep clock
+    /// drifting out of the receive window during the skipped events, not of
+    /// a random radio fade. PowerOptimized asks for latency 0 at 90–180 ms
+    /// (6 s timeout), so the sock has to listen at every event, about every
+    /// 120 ms. The request only lasts while the returned object is alive.
+    /// </summary>
+    private void RequestLatencyZero()
+    {
+        if (_device is null || !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
+        try
+        {
+            _paramsRequest?.Dispose();
+            _paramsRequest = _device.RequestPreferredConnectionParameters(
+                BluetoothLEPreferredConnectionParameters.PowerOptimized);
+            Logf($"Requested latency-0 link parameters: {_paramsRequest.Status}");
+        }
+        catch (Exception ex) { Logf($"Link parameter request failed: {ex.Message}"); }
+    }
+
     // A sock that renegotiates its link right before dropping would show up here.
     private void OnConnectionParametersChanged(BluetoothLEDevice sender, object args)
     {
@@ -583,6 +612,7 @@ public sealed class SockClient : IAsyncDisposable
             Logf($"Reconnected by Windows after {down.TotalSeconds:0} s.");
             _connectedAtUtc = DateTime.UtcNow;
             _batteryPollTimer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
+            RequestLatencyZero();
             SetHealth(LinkHealth.Connected);
             ConnectionChanged?.Invoke(this, true);
             StartKeepAlive();
@@ -692,6 +722,11 @@ public sealed class SockClient : IAsyncDisposable
             catch { }
         }
         ReleaseGattObjects();
+        if (_paramsRequest is not null)
+        {
+            try { _paramsRequest.Dispose(); } catch { }
+            _paramsRequest = null;
+        }
         if (_session is not null)
         {
             try { _session.MaintainConnection = false; } catch { }

@@ -413,7 +413,7 @@ function App() {
               {["sockL", "sockR"].filter((id) => devices[id].health === "stuck" || devices[id].health === "absent").map((id) => (
                 <div className="note warn" key={id}>
                   {devices[id].health === "stuck"
-                    ? <><strong>{DEVICE_META[id].title}</strong> is advertising but refuses every connection. Unplug its battery for 5 s and plug it back in.</>
+                    ? <><strong>{DEVICE_META[id].title}</strong> has been advertising for over 5 minutes but won't accept a connection. If it doesn't come back, unplug its battery for 5 s.</>
                     : <><strong>{DEVICE_META[id].title}</strong> isn't sending anything: switched off, battery flat, or out of range.</>}
                 </div>
               ))}
