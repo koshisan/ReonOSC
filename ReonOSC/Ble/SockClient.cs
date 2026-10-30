@@ -267,12 +267,14 @@ public sealed class SockClient : IAsyncDisposable
         var bindToken = _bindCts.Token;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(outerCt, bindToken);
         var ct = linked.Token;
+        var attemptStart = DateTime.UtcNow;
+        if (_failStreak == 0) _streakStartUtc = attemptStart;
         try
         {
             // Direct open first. If the OS still knows the device (it was
             // connected earlier, or Windows is still holding the link after a
             // drop), the sock isn't advertising and a scan would never see it.
-            Logf($"Opening {FormatMac(addr)} …");
+            if (_failStreak == 0) Logf($"Opening {FormatMac(addr)} …");
             _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr).AsTask(ct);
             if (_device is null)
             {
@@ -281,8 +283,8 @@ public sealed class SockClient : IAsyncDisposable
                 var adv = await WaitForMacAdvertAsync(addr, TimeSpan.FromSeconds(25), ct).ConfigureAwait(false);
                 if (!adv.Seen)
                 {
-                    Logf($"Not in OS cache and no advert in 25 s ({adv.TotalAdverts} BLE adverts from other devices) — will retry.");
-                    ScheduleReconnect();
+                    NoteFailure($"not in OS cache and no advert in 25 s ({adv.TotalAdverts} adverts from other devices)");
+                    ScheduleReconnect(attemptStart);
                     return;
                 }
                 Logf($"Advert seen after {adv.Elapsed.TotalSeconds:0.0} s (RSSI {adv.Rssi} dBm).");
@@ -291,6 +293,8 @@ public sealed class SockClient : IAsyncDisposable
             }
 
             _device.ConnectionStatusChanged += OnConnectionStatusChanged;
+            if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+                _device.ConnectionParametersChanged += OnConnectionParametersChanged;
 
             // Ask Windows to keep the link up and reconnect on its own after a
             // drop. Its background reconnect works where our own advert scan
@@ -305,7 +309,12 @@ public sealed class SockClient : IAsyncDisposable
 
             await AttachGattAsync(ct).ConfigureAwait(false);
 
-            Logf("Connected.");
+            Logf(_failStreak == 0
+                ? "Connected."
+                : $"Connected after {_failStreak} failed attempts ({(DateTime.UtcNow - _streakStartUtc).TotalSeconds:0} s).");
+            _failStreak = 0;
+            _connectedAtUtc = DateTime.UtcNow;
+            LogLinkParameters("link");
             ConnectionChanged?.Invoke(this, true);
 
             // Kick a battery query right away so the UI gets a value fast,
@@ -319,10 +328,43 @@ public sealed class SockClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Logf($"Connect failed: {ex.Message}");
+            NoteFailure(ex.Message);
             await TearDownDeviceAsync().ConfigureAwait(false);
-            ScheduleReconnect();
+            ScheduleReconnect(attemptStart);
         }
+    }
+
+    private int _failStreak;
+    private DateTime _streakStartUtc;
+
+    /// <summary>Retries now run back to back, so log the first failure of a
+    /// streak and then a summary every 10 attempts instead of every line.</summary>
+    private void NoteFailure(string reason)
+    {
+        _failStreak++;
+        if (_failStreak == 1)
+            Logf($"Connect failed: {reason} — retrying continuously.");
+        else if (_failStreak % 10 == 0)
+            Logf($"Still not connected after {_failStreak} attempts ({(DateTime.UtcNow - _streakStartUtc).TotalSeconds:0} s); last: {reason}");
+    }
+
+    /// <summary>Log the negotiated connection interval, slave latency,
+    /// supervision timeout and PHY. Evidence for why links drop: a short
+    /// supervision timeout combined with a radio that misses events would
+    /// explain the drops seen with one of the socks.</summary>
+    private void LogLinkParameters(string what)
+    {
+        if (_device is null || !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
+        try
+        {
+            var p = _device.GetConnectionParameters();
+            var phy = _device.GetConnectionPhy();
+            string Phy(BluetoothLEConnectionPhyInfo i) =>
+                i.IsUncoded2MPhy ? "2M" : i.IsUncoded1MPhy ? "1M" : i.IsCodedPhy ? "Coded" : "?";
+            Logf($"{what}: interval {p.ConnectionInterval * 1.25:0.##} ms, latency {p.ConnectionLatency}, " +
+                 $"supervision timeout {p.LinkTimeout * 10} ms, PHY tx {Phy(phy.TransmitInfo)} / rx {Phy(phy.ReceiveInfo)}");
+        }
+        catch (Exception ex) { Logf($"{what}: parameters unavailable ({ex.Message})"); }
     }
 
     /// <summary>Fetch FFF0/FFF1/FFF2 fresh and subscribe to notifications.
@@ -370,15 +412,17 @@ public sealed class SockClient : IAsyncDisposable
             if (_dropped || _writeChar is null) return;
             _dropped = true;
             _droppedAtUtc = DateTime.UtcNow;
-            Logf("Disconnected — waiting for Windows to restore the link.");
+            var connectedFor = DateTime.UtcNow - _connectedAtUtc;
+            Logf($"Disconnected after {connectedFor.TotalMinutes:0.0} min connected — reconnecting.");
             _batteryPollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             // The sock may have power-cycled; force the next reconcile to
             // resend the target instead of trusting the pre-drop value.
             LastSentTempC = null;
             ConnectionChanged?.Invoke(this, false);
-            // Keep the device + session: MaintainConnection makes Windows
-            // reconnect in the background. Only if that hasn't happened in
-            // OsReconnectGrace do we tear down and start over.
+            // Field logs: Windows' own MaintainConnection reconnect never
+            // restored a dropped sock, not once in seven drops, while our
+            // explicit reopen did. So only give it a moment for a brief blip,
+            // then reopen ourselves.
             _watchdog.Change(OsReconnectGrace, Timeout.InfiniteTimeSpan);
         }
         else if (sender.ConnectionStatus == BluetoothConnectionStatus.Connected && _dropped)
@@ -387,7 +431,14 @@ public sealed class SockClient : IAsyncDisposable
         }
     }
 
-    private static readonly TimeSpan OsReconnectGrace = TimeSpan.FromSeconds(90);
+    // A sock that renegotiates its link right before dropping would show up here.
+    private void OnConnectionParametersChanged(BluetoothLEDevice sender, object args)
+    {
+        if (_writeChar is not null && !_dropped) LogLinkParameters("link changed");
+    }
+
+    private static readonly TimeSpan OsReconnectGrace = TimeSpan.FromSeconds(2);
+    private DateTime _connectedAtUtc;
 
     private async Task ResumeAfterOsReconnectAsync()
     {
@@ -402,6 +453,7 @@ public sealed class SockClient : IAsyncDisposable
             _dropped = false;
             _watchdog.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             Logf($"Reconnected by Windows after {down.TotalSeconds:0} s.");
+            _connectedAtUtc = DateTime.UtcNow;
             _batteryPollTimer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
             ConnectionChanged?.Invoke(this, true);
         }
@@ -410,7 +462,7 @@ public sealed class SockClient : IAsyncDisposable
             Logf($"Resume after reconnect failed: {ex.Message} — full reconnect.");
             _dropped = false;
             await TearDownDeviceAsync().ConfigureAwait(false);
-            ScheduleReconnect();
+            ScheduleReconnect(DateTime.MinValue);
         }
         finally { _connectLock.Release(); }
     }
@@ -418,7 +470,6 @@ public sealed class SockClient : IAsyncDisposable
     private void OnWatchdog()
     {
         if (!_dropped || _disposed || !_reconnectRequested) return;
-        Logf($"Windows didn't restore the link within {OsReconnectGrace.TotalSeconds:0} s — reopening.");
         _ = Task.Run(async () =>
         {
             await _connectLock.WaitAsync().ConfigureAwait(false);
@@ -433,16 +484,24 @@ public sealed class SockClient : IAsyncDisposable
         });
     }
 
-    private void ScheduleReconnect()
+    /// <param name="attemptStart">When the failed attempt began. The socks
+    /// advertise only every 10–30 s and a Windows connect attempt waits ~8 s
+    /// for one, so a slow failure is retried immediately: any pause is a
+    /// window in which an advert can be missed. Only a fast failure (an error
+    /// rather than a timeout) gets a pause, so it can't spin.</param>
+    private void ScheduleReconnect(DateTime attemptStart)
     {
         if (!_reconnectRequested || _disposed) return;
+        var delay = DateTime.UtcNow - attemptStart < TimeSpan.FromSeconds(2)
+            ? TimeSpan.FromSeconds(3)
+            : TimeSpan.FromMilliseconds(200);
         // Tied to the current binding: an unbind (e.g. a swap) cancels it, so
         // a retry planned for the old binding can't become a second retry
         // chain next to the new one.
         var bindToken = _bindCts.Token;
         _ = Task.Run(async () =>
         {
-            try { await Task.Delay(TimeSpan.FromSeconds(5), bindToken).ConfigureAwait(false); }
+            try { await Task.Delay(delay, bindToken).ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
             if (_disposed || !_reconnectRequested || IsConnected) return;
             await _connectLock.WaitAsync().ConfigureAwait(false);
@@ -494,6 +553,8 @@ public sealed class SockClient : IAsyncDisposable
         if (_device is not null)
         {
             try { _device.ConnectionStatusChanged -= OnConnectionStatusChanged; } catch { }
+            if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+                try { _device.ConnectionParametersChanged -= OnConnectionParametersChanged; } catch { }
             try { _device.Dispose(); } catch { }
             _device = null;
         }
