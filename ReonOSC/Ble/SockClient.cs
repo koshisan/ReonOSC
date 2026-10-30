@@ -31,6 +31,7 @@ public sealed class SockClient : IAsyncDisposable
 
     private BluetoothLEDevice? _device;
     private GattSession? _session;
+    private GattDeviceService? _gattService;
     private GattCharacteristic? _writeChar;
     private GattCharacteristic? _notifyChar;
     private volatile bool _dropped;
@@ -374,12 +375,7 @@ public sealed class SockClient : IAsyncDisposable
     private async Task AttachGattAsync(CancellationToken ct)
     {
         if (_device is null) throw new InvalidOperationException("no device");
-        if (_notifyChar is not null)
-        {
-            try { _notifyChar.ValueChanged -= OnNotify; } catch { }
-            _notifyChar = null;
-        }
-        _writeChar = null;
+        ReleaseGattObjects();
 
         var svcResult = await _device
             .GetGattServicesForUuidAsync(SockProtocol.ServiceUuid, BluetoothCacheMode.Uncached)
@@ -387,6 +383,12 @@ public sealed class SockClient : IAsyncDisposable
         if (svcResult.Status != GattCommunicationStatus.Success || svcResult.Services.Count == 0)
             throw new InvalidOperationException($"FFF0 service not found: {svcResult.Status}");
         var svc = svcResult.Services[0];
+        for (int i = 1; i < svcResult.Services.Count; i++)
+            try { svcResult.Services[i].Dispose(); } catch { }
+        // Held until teardown: an undisposed GattDeviceService keeps the
+        // service open in this process, and the next client to open the same
+        // sock (e.g. the other foot after a swap) gets AccessDenied.
+        _gattService = svc;
 
         var write  = await GetCharAsync(svc, SockProtocol.CharWrite,  ct).ConfigureAwait(false);
         var notify = await GetCharAsync(svc, SockProtocol.CharNotify, ct).ConfigureAwait(false);
@@ -525,25 +527,42 @@ public sealed class SockClient : IAsyncDisposable
         }
     }
 
+    private void ReleaseGattObjects()
+    {
+        if (_notifyChar is not null)
+        {
+            try { _notifyChar.ValueChanged -= OnNotify; } catch { }
+            _notifyChar = null;
+        }
+        _writeChar = null;
+        if (_gattService is not null)
+        {
+            try { _gattService.Dispose(); } catch { }
+            _gattService = null;
+        }
+    }
+
     private async Task TearDownDeviceAsync()
     {
         _batteryPollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _watchdog.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _dropped = false;
-        if (_notifyChar is not null)
+        // Unsubscribe on the sock only while the link is up: on a dropped link
+        // this write would itself start an ~8 s connect attempt and delay the
+        // reconnect by that much.
+        if (_notifyChar is not null && _device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
         {
             try
             {
-                _notifyChar.ValueChanged -= OnNotify;
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 await _notifyChar
                     .WriteClientCharacteristicConfigurationDescriptorAsync(
                         GattClientCharacteristicConfigurationDescriptorValue.None)
-                    .AsTask().ConfigureAwait(false);
+                    .AsTask(cts.Token).ConfigureAwait(false);
             }
             catch { }
-            _notifyChar = null;
         }
-        _writeChar = null;
+        ReleaseGattObjects();
         if (_session is not null)
         {
             try { _session.MaintainConnection = false; } catch { }
