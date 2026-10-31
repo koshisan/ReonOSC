@@ -1,0 +1,7 @@
+{
+  "mqtt_host": "192.168.81.210",
+  "mqtt_port": 1883,
+  "base_topic": "sockbridge",
+  "command_timeout_s": 120,
+  "socks": ["ED:88:26:79:BF:B4", "33:3B:4C:46:D1:76"]
+}
