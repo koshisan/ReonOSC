@@ -21,7 +21,7 @@ namespace ReonOSC.Ble;
 /// the socket is up. If it's down, the write is dropped silently (the
 /// higher-layer resolver will re-fire on the next OSC/manual event anyway).
 /// </summary>
-public sealed class SockClient : IAsyncDisposable
+public sealed class SockClient : ISockLink
 {
     /// <summary>Label purely for log lines and the per-sock event origin.
     /// L/R assignment lives higher up — SockClient itself only knows its MAC.</summary>

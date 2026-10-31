@@ -450,6 +450,14 @@ public sealed class WebViewBridge : IDisposable
     {
         var tag = side == SockClient.Side.Left ? "sockL" : "sockR";
         var label = side == SockClient.Side.Left ? "L" : "R";
+        if (_service.SocksViaBridge)
+        {
+            // The bridge holds the socks by MAC (its config.json); there is
+            // nothing to pair on this PC. Swap still works for L/R.
+            Push("log.line", new { t = Ts(), kind = "info",
+                msg = $"Sock {label}: pairing isn't needed with the sockbridge; the bridge's config lists the socks." });
+            return;
+        }
         PushDeviceState(tag, "pairing");
         Push("log.line", new { t = Ts(), kind = "info", msg = $"Scanning for Sock {label} …" });
 

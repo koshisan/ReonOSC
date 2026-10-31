@@ -12,8 +12,12 @@ namespace ReonOSC.Services;
 public sealed class ControlService : IAsyncDisposable
 {
     public ReonClient Reon { get; } = new();
-    public SockClient SockL { get; } = new(SockClient.Side.Left);
-    public SockClient SockR { get; } = new(SockClient.Side.Right);
+    public ISockLink SockL { get; }
+    public ISockLink SockR { get; }
+
+    /// <summary>Set when the socks go through the sockbridge instead of local BLE.</summary>
+    private readonly SockBridgeConnection? _sockBridge;
+    public bool SocksViaBridge => _sockBridge is not null;
     public OscServer Osc { get; } = new();
     public PfSignalReader PfSignal { get; } = new();
     public Settings Settings { get; private set; }
@@ -79,6 +83,19 @@ public sealed class ControlService : IAsyncDisposable
     public ControlService(Settings settings)
     {
         Settings = settings;
+        if (string.Equals(settings.SockBackend, "mqtt", StringComparison.OrdinalIgnoreCase))
+        {
+            _sockBridge = new SockBridgeConnection(settings);
+            _sockBridge.Log += (_, msg) => Log?.Invoke(this, msg);
+            SockL = new MqttSockLink(SockClient.Side.Left, _sockBridge);
+            SockR = new MqttSockLink(SockClient.Side.Right, _sockBridge);
+            _sockBridge.Start();
+        }
+        else
+        {
+            SockL = new SockClient(SockClient.Side.Left);
+            SockR = new SockClient(SockClient.Side.Right);
+        }
         Osc.MessageReceived += OnOscMessage;
         Osc.Log += (_, msg) => Log?.Invoke(this, msg);
         Reon.Log += (_, msg) => Log?.Invoke(this, msg);
@@ -159,6 +176,8 @@ public sealed class ControlService : IAsyncDisposable
         try { await SockR.TurnOffAsync().ConfigureAwait(false); } catch { }
         try { await SockL.DisposeAsync().ConfigureAwait(false); } catch { }
         try { await SockR.DisposeAsync().ConfigureAwait(false); } catch { }
+        if (_sockBridge is not null)
+            try { await _sockBridge.DisposeAsync().ConfigureAwait(false); } catch { }
         await Reon.DisposeAsync().ConfigureAwait(false);
         _writeLock.Dispose();
     }

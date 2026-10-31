@@ -86,6 +86,15 @@ public sealed class Settings
     /// anything up to 15 as "no timer", so values that low are untested.</summary>
     public int SockDeadManMinutes { get; set; } = 20;
 
+    /// <summary>"ble" = this PC holds the sock links itself; "mqtt" = they go
+    /// through the sockbridge (tools/sockbridge) on a Linux box, over the MQTT
+    /// broker configured above. Windows dropped one sock every few minutes
+    /// where BlueZ held it, so "mqtt" is the reliable option. Needs a restart.</summary>
+    public string SockBackend { get; set; } = "ble";
+
+    /// <summary>Base topic of the sockbridge.</summary>
+    public string SockBridgeTopic { get; set; } = "sockbridge";
+
     // MQTT publish — pushes the current state (mode/level/source, connection,
     // telemetry) to a broker so Home Assistant can mirror the device and react
     // (e.g. turn on the AC when we go into Cool).
