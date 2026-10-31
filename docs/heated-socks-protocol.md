@@ -16,7 +16,8 @@ read from the APK, not yet confirmed on the device.
   LEDs: battery and temperature). The battery pack is only a power bank; on
   its own it switches off and does not advertise.
 - One BLE peripheral per sock. The app remembers two device IDs and sends
-  every command to both.
+  every command to all selected socks (both by default; tapping a sock
+  tile deselects it).
 - Chip: JieLi AC632N.
 
 | Sock | Address |
@@ -132,6 +133,85 @@ So the client should:
   gets populated and `FromBluetoothAddressAsync` has something to
   return,
 - not depend on a fresh scan for each command.
+
+## Connection handling in the vendor app (from app code)
+
+How the app manages the BLE link, for comparison. All of this comes from
+`pages/index/index.vue` and `common/utils/bluetooth.js` in the bundle.
+None of it is verified on the device. The app doesn't do much: it sets no
+MTU, no connection priority and no connection parameters, and there is no
+keep-alive apart from the battery poll.
+
+### Startup and discovery
+
+1. 100 ms after the page loads: reset the adapter and start a scan
+   (`Refresh`, see below). After that, every 2.5 s: if the adapter is still
+   not open, run `Refresh` again.
+2. `Refresh` closes the adapter, which drops all links, opens it again and
+   starts discovery 500 ms later. If starting discovery fails, it retries
+   every 1.5 s.
+3. Discovery uses the defaults: no duplicate reports, no interval, and it
+   keeps running until the user connects by hand. Each device is reported
+   once and filtered by `AF30` / name.
+4. Auto-connect: once **both** stored IDs (`deviceId0`, `deviceId1`) have
+   been seen, it connects to them. With only one sock found, it does not
+   auto-connect.
+5. On Android the app insists on location (GPS) being enabled. While the
+   page is visible it keeps the screen on (`setWakelock`).
+
+Long-pressing a sock tile runs `Refresh` without auto-connect, to pick the
+sock again.
+
+### Connect sequence
+
+- The socks are connected **one after the other**, each with
+  `createBLEConnection` and a **10 s timeout**.
+- If either fails, the app shows "connection failed, retry" and stops. It
+  does not retry on its own.
+- After the last connect: wait **1100 ms on Android** (100 ms on iOS), then
+  run `init`.
+- `init` handles each sock with a **550 ms × index** offset (0 ms, 550 ms):
+  get services → get characteristics of `FFF0` → enable notify on `FFF1` →
+  send the battery query straight away.
+
+### Commands
+
+- Every command goes out **200 ms** after the UI action, as a write to
+  `FFF2` on every selected sock. There is no queue, no debounce and no
+  pacing between the socks. While the slider is being dragged, every
+  change is sent.
+- The battery query runs every **3 s** while the page is visible. It
+  stops when the page is hidden and runs even when no sock is connected.
+
+### Disconnect
+
+- `onBLEConnectionStateChange` with `connected = false` → a "Disconnect"
+  toast, and that sock is marked as not connected.
+- If **no** sock is connected any more, the power switch in the UI goes
+  to off and the timer back to 15 min. Nothing is sent to the socks.
+- **There is no automatic reconnect** on a disconnect event.
+
+### Reconnect (lazy, on the next write)
+
+The app only reconnects when a write fails:
+
+1. Write to `FFF2` fails →
+2. `createBLEConnection` with a **4 s timeout** (not 10 s as on first
+   connect) →
+3. get characteristics of `FFF0`, enable notify on `FFF1` →
+4. send the **same command again**.
+
+If the reconnect fails too, it is only logged. The command is lost until
+the next UI action or battery poll triggers another attempt. Because of the
+3 s battery poll, a dropped sock is in practice retried about every 3 s.
+There is no backoff and no retry limit.
+
+### Timer
+
+The timer slider sends command `02` to the sock and also starts a local
+timer in the app. When that runs out, the app only resets its own UI
+(switch off, timer 15 min) and sends nothing. Switching off at the end of
+the timer is left to the sock (from app code, not verified).
 
 ## Cloud
 
