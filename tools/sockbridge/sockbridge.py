@@ -269,13 +269,16 @@ class Sock:
         timed out (btmon: Disconnect, reason Connection Timeout 0x08). As the
         central we may set the parameters back: latency 0 (it must listen at
         every event) and a 20 s timeout, so a short fade doesn't end the link.
-        Re-applied every minute in case the sock asks again."""
+        Done once: the sock asks only once, and every connection update is a
+        moment where a weak link can be lost (a drop came 5 s after a
+        repeated update)."""
         first = True
         await asyncio.sleep(10)
-        while not gone.is_set():
+        while not gone.is_set() and first:
             handle = await self.hci_handle()
             if handle is None:
                 log(self.id, "link update skipped: no HCI handle")
+                return
             else:
                 proc = await asyncio.create_subprocess_exec(
                     "hcitool", "-i", self.bridge.adapter, "lecup", str(handle), "24", "40", "0", "2000",
@@ -286,7 +289,6 @@ class Sock:
                     log(self.id, f"link update to 30-50 ms / latency 0 / 20 s timeout: "
                                  f"{'failed: ' + msg if proc.returncode else 'requested'}")
                 first = False
-            await asyncio.sleep(60)
 
     async def tick(self, gone):
         n = 0
