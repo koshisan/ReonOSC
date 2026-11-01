@@ -25,6 +25,8 @@ public sealed class SockBridgeConnection : IAsyncDisposable
 
     public event Action<bool>? AvailabilityChanged;
     public event Action<string, JsonElement>? StateReceived;
+    /// <summary>The bridge's list of adopted socks (it finds them itself).</summary>
+    public event Action<IReadOnlyList<ulong>>? AdoptedChanged;
     public event EventHandler<string>? Log;
 
     public SockBridgeConnection(Settings settings)
@@ -116,6 +118,18 @@ public sealed class SockBridgeConnection : IAsyncDisposable
         if (topic == $"{_base}/availability")
         {
             SetOnline(payload == "online");
+            return;
+        }
+        if (topic == $"{_base}/adopted")
+        {
+            try
+            {
+                var macs = new List<ulong>();
+                foreach (var s in JsonSerializer.Deserialize<string[]>(payload) ?? Array.Empty<string>())
+                    macs.Add(SockClient.ParseMac(s));
+                AdoptedChanged?.Invoke(macs);
+            }
+            catch { /* malformed, ignore */ }
             return;
         }
         var parts = topic.Split('/');

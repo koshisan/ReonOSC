@@ -87,6 +87,7 @@ public sealed class ControlService : IAsyncDisposable
         {
             _sockBridge = new SockBridgeConnection(settings);
             _sockBridge.Log += (_, msg) => Log?.Invoke(this, msg);
+            _sockBridge.AdoptedChanged += macs => _ = AssignAdoptedSocksAsync(macs);
             SockL = new MqttSockLink(SockClient.Side.Left, _sockBridge);
             SockR = new MqttSockLink(SockClient.Side.Right, _sockBridge);
             _sockBridge.Start();
@@ -539,6 +540,48 @@ public sealed class ControlService : IAsyncDisposable
     }
 
     private readonly SemaphoreSlim _swapLock = new(1, 1);
+
+    /// <summary>
+    /// The sockbridge finds the socks itself; this decides which foot each one
+    /// is. A MAC that is already L or R keeps its side. A new MAC takes a free
+    /// side, or one whose sock the bridge no longer has (a replaced sock);
+    /// with both sides held by socks the bridge still has, it stays unassigned.
+    /// </summary>
+    private async Task AssignAdoptedSocksAsync(IReadOnlyList<ulong> adopted)
+    {
+        await _swapLock.WaitAsync().ConfigureAwait(false);   // not mid-swap
+        try
+        {
+            var l = TryParseMac(Settings.SockLMac);
+            var r = TryParseMac(Settings.SockRMac);
+            foreach (var mac in adopted)
+            {
+                if (mac == l || mac == r) continue;
+                var name = SockClient.FormatMac(mac);
+                if (l is null || !adopted.Contains(l.Value))
+                {
+                    Log?.Invoke(this, $"Socks: {name} from the sockbridge → L");
+                    Settings.SockLMac = name;
+                    l = mac;
+                    Settings.Save();
+                    await SockL.BindAsync(mac).ConfigureAwait(false);
+                }
+                else if (r is null || !adopted.Contains(r.Value))
+                {
+                    Log?.Invoke(this, $"Socks: {name} from the sockbridge → R");
+                    Settings.SockRMac = name;
+                    r = mac;
+                    Settings.Save();
+                    await SockR.BindAsync(mac).ConfigureAwait(false);
+                }
+                else
+                {
+                    Log?.Invoke(this, $"Socks: {name} from the sockbridge left unassigned — L and R are taken.");
+                }
+            }
+        }
+        finally { _swapLock.Release(); }
+    }
 
     private static ulong? TryParseMac(string? mac)
     {
