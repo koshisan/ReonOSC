@@ -277,56 +277,16 @@ class Sock:
             await self.apply_target(force=True)
             await self.write(BATTERY_QUERY)
             tick = asyncio.create_task(self.tick(gone))
-            relax = asyncio.create_task(self.relax_link(gone))
             try:
                 await gone.wait()
             finally:
                 tick.cancel()
-                relax.cancel()
             up_min = (time.monotonic() - self.up_since) / 60
             self.connected, self.health, self.sent = False, "connecting", None
             self.down_since = time.monotonic()
             log(self.id, f"disconnected (link lasted {up_min:.1f} min); "
                          f"BlueZ still knows it: {await self.bluez_knows()}")
             self.publish()
-
-    async def hci_handle(self):
-        proc = await asyncio.create_subprocess_exec(
-            "hcitool", "-i", self.bridge.adapter, "con",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await proc.communicate()
-        for line in out.decode().splitlines():
-            if self.mac in line.upper() and "handle" in line:
-                return int(line.split("handle")[1].split()[0])
-        return None
-
-    async def relax_link(self, gone):
-        """About 7 s after connecting the sock asks for interval 30 ms with
-        latency 10 and a 6 s supervision timeout. With those, the weaker sock
-        answered with seconds of delay and then went silent until the link
-        timed out (btmon: Disconnect, reason Connection Timeout 0x08). As the
-        central we may set the parameters back: latency 0 (it must listen at
-        every event) and a 20 s timeout, so a short fade doesn't end the link.
-        Done once: the sock asks only once, and every connection update is a
-        moment where a weak link can be lost (a drop came 5 s after a
-        repeated update)."""
-        first = True
-        await asyncio.sleep(10)
-        while not gone.is_set() and first:
-            handle = await self.hci_handle()
-            if handle is None:
-                log(self.id, "link update skipped: no HCI handle")
-                return
-            else:
-                proc = await asyncio.create_subprocess_exec(
-                    "hcitool", "-i", self.bridge.adapter, "lecup", str(handle), "24", "40", "0", "2000",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                out, err = await proc.communicate()
-                msg = (out + err).decode().strip()
-                if proc.returncode or first:
-                    log(self.id, f"link update to 30-50 ms / latency 0 / 20 s timeout: "
-                                 f"{'failed: ' + msg if proc.returncode else 'requested'}")
-                first = False
 
     async def tick(self, gone):
         n = 0
@@ -647,7 +607,9 @@ class Bridge:
         # New connections start with the kernel default supervision timeout
         # of 420 ms. On a fresh adapter the weaker sock then failed with
         # "Connection Failed to be Established" within a second; 20 s gives
-        # it time until relax_link() settles the parameters.
+        # it time. Set through the kernel, not with raw HCI commands: raw
+        # hcitool commands sent past BlueZ were the likely trigger of a
+        # dongle lock-up (it hung 3 s after one).
         path = f"/sys/kernel/debug/bluetooth/{self.adapter}/supervision_timeout"
         try:
             with open(path, "w") as f:
