@@ -341,7 +341,10 @@ class Bridge:
             async with self.connect_lock:
                 await self.scanner_stop()
                 try:
-                    client = BleakClient(device, timeout=30)
+                    # The connection can only happen on the sock's next advert,
+                    # which can be a minute away; a short timeout plus a retry
+                    # cooldown missed most of them.
+                    client = BleakClient(device, timeout=90)
                     await client.connect()
                 finally:
                     self.wake_scanner()
@@ -365,7 +368,7 @@ class Bridge:
             except Exception as e:
                 log(f"{mac}: verification failed ({type(e).__name__}: {e})")
                 await client.disconnect()
-                self.retry_after[mac] = time.monotonic() + 60
+                self.retry_after[mac] = time.monotonic() + 5
                 return
             if not any(battery_from_frame(r) is not None for r in replies):
                 log(f"{mac}: no sock battery reply ({[r.hex() for r in replies]}) — ignoring this device")
@@ -374,13 +377,18 @@ class Bridge:
                 return
             # Keep the link: the new Sock attaches to it, so a sock that
             # advertises rarely doesn't have to be found a second time.
-            if len(self.socks) < self.max_socks:
-                self.add_sock(mac, "verified")
-            else:
-                await client.disconnect()
+            if len(self.socks) >= self.max_socks:
+                stale = self.stale_sock()
+                if stale is None:
+                    await client.disconnect()
+                    return
+                log(stale.id, f"replaced by {mac}: not heard for {self.STALE_AFTER // 60}+ min "
+                              "(the socks come back under a new MAC after a power loss)")
+                await self.remove_sock(stale.id)
+            self.add_sock(mac, "verified")
         except Exception as e:
             log(f"{mac}: test connection failed ({type(e).__name__}: {e})")
-            self.retry_after[mac] = time.monotonic() + 60
+            self.retry_after[mac] = time.monotonic() + 5
         finally:
             self.verifying = False
 
@@ -446,13 +454,25 @@ class Bridge:
                 sock.publish()
             sock.seen.set()
             return
-        if (len(self.socks) < self.max_socks and self.adopted_loaded.is_set()
-                and not self.verifying and mac not in self.rejected
+        if (self.adopted_loaded.is_set() and not self.verifying and mac not in self.rejected
                 and time.monotonic() >= self.retry_after.get(mac, 0)
-                and self.is_candidate(device, adv)):
+                and self.is_candidate(device, adv)
+                and (len(self.socks) < self.max_socks or self.stale_sock() is not None)):
             self.verifying = True
             log(f"{mac}: candidate (rssi {adv.rssi}) — test connection")
             asyncio.ensure_future(self.verify(device))
+
+    STALE_AFTER = 600
+
+    def stale_sock(self):
+        """An adopted sock that has been neither connected nor heard for
+        STALE_AFTER s. The socks come back under a new MAC after a power
+        loss (seen in the field), so a full bridge would otherwise lock out
+        the very same socks."""
+        now = time.monotonic()
+        stale = [s for s in self.socks.values()
+                 if not s.connected and now - max(s.down_since, s.last_advert) > self.STALE_AFTER]
+        return min(stale, key=lambda s: max(s.down_since, s.last_advert), default=None)
 
     def wake_scanner(self):
         self.scanner_wakeup.set()
