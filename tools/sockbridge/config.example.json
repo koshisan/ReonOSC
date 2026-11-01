@@ -3,5 +3,6 @@
   "mqtt_port": 1883,
   "base_topic": "sockbridge",
   "command_timeout_s": 120,
-  "max_socks": 2
+  "max_socks": 2,
+  "adapter": "hci0"
 }

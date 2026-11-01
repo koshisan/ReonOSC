@@ -72,8 +72,8 @@ def battery_from_frame(data):
     return None
 
 
-def bluez_path(mac):
-    return "/org/bluez/hci0/dev_" + mac.upper().replace(":", "_")
+def bluez_path(mac, adapter):
+    return f"/org/bluez/{adapter}/dev_" + mac.upper().replace(":", "_")
 
 
 class Sock:
@@ -81,7 +81,7 @@ class Sock:
         self.bridge = bridge
         self.mac = mac.upper()
         self.id = self.mac.replace(":", "").lower()
-        self.path = bluez_path(self.mac)
+        self.path = bluez_path(self.mac, bridge.adapter)
         self.client = None
         self.task = None
         self.connected = False
@@ -214,7 +214,7 @@ class Sock:
                         # Held under connect_lock: one pending LE connection at
                         # a time, so a second down sock gets its turn every 30 s.
                         self.client = BleakClient(dev, disconnected_callback=lambda _: gone.set(),
-                                                  timeout=30)
+                                                  timeout=30, adapter=self.bridge.adapter)
                         await self.client.connect()
                     finally:
                         self.bridge.wake_scanner()
@@ -239,16 +239,54 @@ class Sock:
             await self.apply_target(force=True)
             await self.write(BATTERY_QUERY)
             tick = asyncio.create_task(self.tick(gone))
+            relax = asyncio.create_task(self.relax_link(gone))
             try:
                 await gone.wait()
             finally:
                 tick.cancel()
+                relax.cancel()
             up_min = (time.monotonic() - self.up_since) / 60
             self.connected, self.health, self.sent = False, "connecting", None
             self.down_since = time.monotonic()
             log(self.id, f"disconnected (link lasted {up_min:.1f} min); "
                          f"BlueZ still knows it: {await self.bluez_knows()}")
             self.publish()
+
+    async def hci_handle(self):
+        proc = await asyncio.create_subprocess_exec(
+            "hcitool", "-i", self.bridge.adapter, "con",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        for line in out.decode().splitlines():
+            if self.mac in line.upper() and "handle" in line:
+                return int(line.split("handle")[1].split()[0])
+        return None
+
+    async def relax_link(self, gone):
+        """About 7 s after connecting the sock asks for interval 30 ms with
+        latency 10 and a 6 s supervision timeout. With those, the weaker sock
+        answered with seconds of delay and then went silent until the link
+        timed out (btmon: Disconnect, reason Connection Timeout 0x08). As the
+        central we may set the parameters back: latency 0 (it must listen at
+        every event) and a 20 s timeout, so a short fade doesn't end the link.
+        Re-applied every minute in case the sock asks again."""
+        first = True
+        await asyncio.sleep(10)
+        while not gone.is_set():
+            handle = await self.hci_handle()
+            if handle is None:
+                log(self.id, "link update skipped: no HCI handle")
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    "hcitool", "-i", self.bridge.adapter, "lecup", str(handle), "24", "40", "0", "2000",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                out, err = await proc.communicate()
+                msg = (out + err).decode().strip()
+                if proc.returncode or first:
+                    log(self.id, f"link update to 30-50 ms / latency 0 / 20 s timeout: "
+                                 f"{'failed: ' + msg if proc.returncode else 'requested'}")
+                first = False
+            await asyncio.sleep(60)
 
     async def tick(self, gone):
         n = 0
@@ -277,6 +315,9 @@ class Sock:
 class Bridge:
     def __init__(self, cfg):
         self.base = cfg.get("base_topic", "sockbridge")
+        # BlueZ adapter to use, e.g. "hci1" for a USB dongle with a proper
+        # antenna instead of the Pi's on-board chip.
+        self.adapter = cfg.get("adapter", "hci0")
         self.command_timeout = cfg.get("command_timeout_s", 120)
         self.max_socks = cfg.get("max_socks", 2)
         self.socks = {}               # mac -> Sock
@@ -288,7 +329,7 @@ class Bridge:
         self.connect_lock = asyncio.Lock()
         self.scanner_wakeup = asyncio.Event()
         self.devices = {}
-        self.scanner = BleakScanner(detection_callback=self.on_advert, scanning_mode="active")
+        self.scanner = BleakScanner(detection_callback=self.on_advert, scanning_mode="active", adapter=self.adapter)
         self.scanning = False
         self.loop = None
 
@@ -344,7 +385,7 @@ class Bridge:
                     # The connection can only happen on the sock's next advert,
                     # which can be a minute away; a short timeout plus a retry
                     # cooldown missed most of them.
-                    client = BleakClient(device, timeout=90)
+                    client = BleakClient(device, timeout=90, adapter=self.adapter)
                     await client.connect()
                 finally:
                     self.wake_scanner()
@@ -358,15 +399,33 @@ class Bridge:
                     self.rejected.add(mac)
                     await client.disconnect()
                     return
-                await client.start_notify(NOTIFY, lambda _, d: replies.append(bytes(d)))
-                await client.write_gatt_char(WRITE, BATTERY_QUERY, response=True)
+                # One sock answered the first GATT request right after
+                # connecting with ATT "Unlikely Error"; retry the steps once
+                # and log which step it was.
+                step = "?"
+                for attempt in (1, 2):
+                    try:
+                        step = "enable notify (FFF1)"
+                        await client.start_notify(NOTIFY, lambda _, d: replies.append(bytes(d)))
+                        step = "battery query (FFF2)"
+                        await client.write_gatt_char(WRITE, BATTERY_QUERY, response=True)
+                        break
+                    except Exception as e:
+                        if attempt == 2:
+                            raise
+                        log(f"{mac}: {step} failed ({type(e).__name__}: {e}) — retrying in 1.5 s")
+                        try:
+                            await client.stop_notify(NOTIFY)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1.5)
                 for _ in range(30):
                     if any(battery_from_frame(r) is not None for r in replies):
                         break
                     await asyncio.sleep(0.1)
                 await client.stop_notify(NOTIFY)
             except Exception as e:
-                log(f"{mac}: verification failed ({type(e).__name__}: {e})")
+                log(f"{mac}: verification failed at {step} ({type(e).__name__}: {e})")
                 await client.disconnect()
                 self.retry_after[mac] = time.monotonic() + 5
                 return
