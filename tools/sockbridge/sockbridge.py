@@ -26,8 +26,12 @@ until the first command, and switched off whenever no command arrived for
 """
 
 import asyncio
+import glob
 import json
+import os
+import re
 import signal
+import subprocess
 import sys
 import time
 
@@ -74,6 +78,40 @@ def battery_from_frame(data):
 
 def bluez_path(mac, adapter):
     return f"/org/bluez/{adapter}/dev_" + mac.upper().replace(":", "_")
+
+
+def find_adapters():
+    """{"hciN": (BD address, USB device number or None)} for the adapters
+    present right now. The USB device number changes when the kernel
+    resets and re-enumerates a dongle, which is how a reset is noticed."""
+    found = {}
+    for path in sorted(glob.glob("/sys/class/bluetooth/hci[0-9]*")):
+        name = os.path.basename(path)
+        if ":" in name:                       # hci0:65 etc. are connections
+            continue
+        try:
+            with open(f"/sys/kernel/debug/bluetooth/{name}/identity") as f:
+                addr = f.read().split()[0].upper()
+        except (OSError, IndexError):
+            addr = None
+        try:
+            with open(os.path.join(os.path.realpath(f"{path}/device"), "..", "devnum")) as f:
+                devnum = f.read().strip()
+        except OSError:
+            devnum = None
+        found[name] = (addr, devnum)
+    return found
+
+
+def resolve_adapter(spec):
+    """Config "adapter" is "hciN" or the adapter's BD address. The address is
+    stable; the index isn't (a dongle reset can bring it back as hci2)."""
+    if re.fullmatch(r"hci\d+", spec):
+        return spec
+    for name, (addr, _) in find_adapters().items():
+        if addr == spec.upper():
+            return name
+    return None
 
 
 class Sock:
@@ -317,9 +355,16 @@ class Sock:
 class Bridge:
     def __init__(self, cfg):
         self.base = cfg.get("base_topic", "sockbridge")
-        # BlueZ adapter to use, e.g. "hci1" for a USB dongle with a proper
-        # antenna instead of the Pi's on-board chip.
-        self.adapter = cfg.get("adapter", "hci0")
+        # BlueZ adapter to use: "hciN" or, better, its BD address, e.g. a USB
+        # dongle with a proper antenna instead of the Pi's on-board chip.
+        spec = cfg.get("adapter", "hci0")
+        self.adapter = resolve_adapter(spec)
+        if self.adapter is None:
+            # Dongle missing or still enumerating; systemd restarts us.
+            log(f"adapter {spec} not present — exiting so systemd retries")
+            sys.exit(3)
+        self.adapter_id = find_adapters().get(self.adapter)
+        log(f"using {self.adapter} (address {self.adapter_id[0]}, usb devnum {self.adapter_id[1]})")
         self.command_timeout = cfg.get("command_timeout_s", 120)
         self.max_socks = cfg.get("max_socks", 2)
         self.socks = {}               # mac -> Sock
@@ -574,6 +619,30 @@ class Bridge:
             except asyncio.TimeoutError:
                 pass
 
+    def power_off_other_adapters(self):
+        # Only one adapter should talk to the socks; after a Pi reboot BlueZ
+        # powers every adapter on, and another one could grab a sock.
+        for name in find_adapters():
+            if name != self.adapter:
+                r = subprocess.run(["btmgmt", "--index", name.removeprefix("hci"), "power", "off"],
+                                   capture_output=True, text=True, timeout=10)
+                log(f"powered off {name} (not ours){'' if r.returncode == 0 else ': ' + r.stderr.strip()}")
+
+    async def adapter_watchdog(self):
+        """The dongle sometimes stops answering; the kernel then resets it
+        over USB ("command tx timeout", "USB disconnect", re-enumeration).
+        That drops all links and the adapter's settings (initial link
+        timeout), and BlueZ objects held here go stale. Restart cleanly:
+        exit and let systemd start us again, which sets everything up."""
+        while True:
+            await asyncio.sleep(3)
+            now = find_adapters().get(self.adapter)
+            if now != self.adapter_id:
+                log(f"adapter {self.adapter} changed {self.adapter_id} -> {now} (reset or unplugged) — restarting")
+                self.mqtt.publish(f"{self.base}/availability", "offline", qos=1, retain=True)
+                await asyncio.sleep(0.5)
+                os._exit(4)
+
     def set_initial_link_timeout(self):
         # New connections start with the kernel default supervision timeout
         # of 420 ms. On a fresh adapter the weaker sock then failed with
@@ -588,7 +657,9 @@ class Bridge:
 
     async def run(self, initial):
         self.loop = asyncio.get_running_loop()
+        self.power_off_other_adapters()
         self.set_initial_link_timeout()
+        asyncio.ensure_future(self.adapter_watchdog())
         # systemd stops us with SIGTERM; turn that into a cancellation so the
         # finally block below still switches the socks off.
         main = asyncio.current_task()

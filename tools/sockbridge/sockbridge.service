@@ -2,6 +2,9 @@
 Description=Heated socks BLE <-> MQTT bridge (ReonOSC)
 After=bluetooth.service network-online.target
 Wants=bluetooth.service network-online.target
+# The bridge exits on purpose when its USB dongle resets or is missing;
+# never stop restarting it.
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=/opt/sockbridge/venv/bin/python -u /opt/sockbridge/sockbridge.py /opt/sockbridge/config.json
