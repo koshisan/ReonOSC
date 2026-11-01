@@ -214,7 +214,7 @@ class Sock:
                         # Held under connect_lock: one pending LE connection at
                         # a time, so a second down sock gets its turn every 30 s.
                         self.client = BleakClient(dev, disconnected_callback=lambda _: gone.set(),
-                                                  timeout=30, adapter=self.bridge.adapter)
+                                                  timeout=30, bluez={"adapter": self.bridge.adapter})
                         await self.client.connect()
                     finally:
                         self.bridge.wake_scanner()
@@ -329,7 +329,7 @@ class Bridge:
         self.connect_lock = asyncio.Lock()
         self.scanner_wakeup = asyncio.Event()
         self.devices = {}
-        self.scanner = BleakScanner(detection_callback=self.on_advert, scanning_mode="active", adapter=self.adapter)
+        self.scanner = BleakScanner(detection_callback=self.on_advert, scanning_mode="active", bluez={"adapter": self.adapter})
         self.scanning = False
         self.loop = None
 
@@ -385,7 +385,7 @@ class Bridge:
                     # The connection can only happen on the sock's next advert,
                     # which can be a minute away; a short timeout plus a retry
                     # cooldown missed most of them.
-                    client = BleakClient(device, timeout=90, adapter=self.adapter)
+                    client = BleakClient(device, timeout=90, bluez={"adapter": self.adapter})
                     await client.connect()
                 finally:
                     self.wake_scanner()
@@ -572,8 +572,21 @@ class Bridge:
             except asyncio.TimeoutError:
                 pass
 
+    def set_initial_link_timeout(self):
+        # New connections start with the kernel default supervision timeout
+        # of 420 ms. On a fresh adapter the weaker sock then failed with
+        # "Connection Failed to be Established" within a second; 20 s gives
+        # it time until relax_link() settles the parameters.
+        path = f"/sys/kernel/debug/bluetooth/{self.adapter}/supervision_timeout"
+        try:
+            with open(path, "w") as f:
+                f.write("2000")
+        except OSError as e:
+            log(f"could not set {path}: {e}")
+
     async def run(self, initial):
         self.loop = asyncio.get_running_loop()
+        self.set_initial_link_timeout()
         # systemd stops us with SIGTERM; turn that into a cancellation so the
         # finally block below still switches the socks off.
         main = asyncio.current_task()
